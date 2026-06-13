@@ -66,6 +66,7 @@ const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
 // Global browser instance (reused for all requests - MUCH faster!)
 let globalBrowser = null;
+const campaignCache = new Map();
 
 const getBrowser = async () => {
   if (!globalBrowser) {
@@ -259,6 +260,95 @@ const simulateReadTime = async () => {
     ENGAGEMENT_CONFIG.read_time_min;
   await new Promise(resolve => setTimeout(resolve, delay));
 };
+
+// ─── Campaign-level idempotency helpers ───────────────────────────────────────
+
+const buildCampaignKey = (senderEmail, subject, date) => {
+  const raw = `${senderEmail}||${subject}||${date}`;
+  return require('crypto').createHash('sha256').update(raw).digest('hex');
+};
+
+const fisherYates = (array) => {
+  const arr = [...array];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+};
+
+const getOrCreateCampaign = async (campaignKey, senderEmail, subject, date, allMailboxes) => {
+  if (campaignCache.has(campaignKey)) return campaignCache.get(campaignKey);
+
+  const { data: existing } = await supabase
+    .from('warmup_campaigns').select('*').eq('campaign_key', campaignKey).maybeSingle();
+  if (existing) { campaignCache.set(campaignKey, existing); return existing; }
+
+  const total        = allMailboxes.length;
+  const openRate     = [0.48, 0.55, 0.60][Math.floor(Math.random() * 3)];
+  const clickRate    = [0.10, 0.20, 0.30, 0.35][Math.floor(Math.random() * 4)];
+  const targetOpens  = Math.round(total * openRate);
+  const targetClicks = Math.round(targetOpens * clickRate);
+
+  const { data: campaign, error: insertError } = await supabase
+    .from('warmup_campaigns')
+    .insert({ campaign_key: campaignKey, provider: 'brevo', sender_email: senderEmail,
+              subject, campaign_date: date, total_mailboxes: total,
+              target_open_rate: openRate, target_click_rate: clickRate,
+              target_opens: targetOpens, target_clicks: targetClicks })
+    .select().single();
+
+  if (insertError) {
+    const { data: raceWinner, error: fetchError } = await supabase
+      .from('warmup_campaigns').select('*').eq('campaign_key', campaignKey).single();
+    if (fetchError || !raceWinner) throw fetchError || new Error('Campaign race fetch failed');
+    campaignCache.set(campaignKey, raceWinner);
+    return raceWinner;
+  }
+
+  const shuffled  = fisherYates(allMailboxes);
+  const decisions = shuffled.map((mb, i) => ({
+    campaign_id:   campaign.id,
+    mailbox_email: mb.email,
+    decision:      i < targetClicks ? 'click' : i < targetOpens ? 'open' : 'skip',
+  }));
+  await supabase.from('warmup_decisions').insert(decisions);
+
+  campaignCache.set(campaignKey, campaign);
+  return campaign;
+};
+
+const getDecision = async (campaignId, mailboxEmail) => {
+  const { data, error } = await supabase
+    .from('warmup_decisions').select('*')
+    .eq('campaign_id', campaignId).eq('mailbox_email', mailboxEmail).single();
+  if (error) throw error;
+  return data;
+};
+
+const markOpenDone = async (id) => {
+  const { error } = await supabase.from('warmup_decisions').update({ open_done: true }).eq('id', id);
+  if (error) throw error;
+};
+const markClickDone = async (id) => {
+  const { error } = await supabase.from('warmup_decisions').update({ click_done: true }).eq('id', id);
+  if (error) throw error;
+};
+
+const markCleanupDone = async (id) => {
+  const { error } = await supabase.from('warmup_decisions').update({ cleanup_done: true }).eq('id', id);
+  if (error) throw error;
+};
+const markDecisionProcessed = async (id) => {
+  const { error } = await supabase.from('warmup_decisions')
+    .update({ processed: true, processed_at: new Date().toISOString() }).eq('id', id);
+  if (error) throw error;
+};
+
+const incrementCampaignOpens  = (id) => supabase.rpc('inc_campaign_opens',  { p_id: id });
+const incrementCampaignClicks = (id) => supabase.rpc('inc_campaign_clicks', { p_id: id });
+
+// ──────────────────────────────────────────────────────────────────────────────
 
 // Mark as read (UID-based for cross-session persistence!)
 const markEmailAsRead = async (mailbox, uid) => {
@@ -564,7 +654,7 @@ const checkPromotionsAndMove = async (mailbox, checkReadEmails = false) => {
 };
 
 // Process mailbox (IDENTICAL engagement logic as test version)
-const processMailbox = async (mailbox, mailboxIndex = 999) => {
+const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) => {
   const ENABLE_CLICKS = mailboxIndex <= CLICK_ENABLED_UNTIL_INDEX;
   const checkReadEmails = shouldCheckReadEmails(mailbox.email);
 
@@ -757,10 +847,37 @@ const processMailbox = async (mailbox, mailboxIndex = 999) => {
         }
         console.log(`          Email age: ${emailAgeHours.toFixed(1)}h (< ${MAX_EMAIL_AGE_HOURS}h) - OK to engage`);
 
-        const willOpen = Math.random() < ENGAGEMENT_CONFIG.open_rate;
+        const emailDate = email.date
+          ? new Date(email.date).toISOString().slice(0, 10)
+          : new Date().toISOString().slice(0, 10);
+        const campaignKey = buildCampaignKey(senderEmail, email.subject || '', emailDate);
+
+        let campaign, decisionRow;
+        try {
+          campaign    = await getOrCreateCampaign(campaignKey, senderEmail,
+                          email.subject || '', emailDate, allMailboxes);
+          decisionRow = await getDecision(campaign.id, mailbox.email);
+        } catch (dbErr) {
+          console.log(`          ⚠️  DB error fetching campaign/decision — skipping: ${dbErr.message}`);
+          continue;
+        }
+        if (!decisionRow) {
+          console.log(`          ⚠️  No decision row found — skipping`);
+          continue;
+        }
+
+        if (decisionRow.processed) {
+          console.log(`          ✅ Already fully processed — archiving`);
+          await markEmailAsRead(mailbox, email.uid);
+          try { await moveToMaxifyLabel(mailbox, email.uid); } catch (e) {}
+          continue;
+        }
+
+        const willOpen  = decisionRow.decision !== 'skip';
+        const willClick = decisionRow.decision === 'click';
 
         if (!willOpen) {
-          console.log(`          ❌ Not engaged (skipped - outside ${Math.round(ENGAGEMENT_CONFIG.open_rate * 100)}% engagement window)`);
+          console.log(`          ❌ Not engaged (decision: skip)`);
           await markEmailAsRead(mailbox, email.uid);
           try {
             await moveToMaxifyLabel(mailbox, email.uid);
@@ -768,10 +885,12 @@ const processMailbox = async (mailbox, mailboxIndex = 999) => {
           } catch (labelError) {
             console.log(`          ⚠️  Archive failed: ${labelError.message}`);
           }
+          await markCleanupDone(decisionRow.id).catch(e =>
+            console.log(`          ⚠️  markCleanupDone failed: ${e.message}`));
+          await markDecisionProcessed(decisionRow.id).catch(e =>
+            console.log(`          ⚠️  markDecisionProcessed failed: ${e.message}`));
           continue;
         }
-
-        const willClick = Math.random() < ENGAGEMENT_CONFIG.click_rate;
 
         const allUrls = extractAllUrls(email.text, email.html);
         console.log(`          📋 Found ${allUrls.length} total URL(s) in email`);
@@ -822,38 +941,51 @@ const processMailbox = async (mailbox, mailboxIndex = 999) => {
           return (isBrevoTracker || isHubSpotTracker || isTrackingPixel) && isNotClickTracker;
         });
 
-        if (trackingPixels.length > 0) {
-          console.log(`          📊 Found ${trackingPixels.length} tracking pixel(s):`);
-          trackingPixels.forEach((pixel, i) => {
-            const source = pixel.includes('hubspot') ? 'HubSpot' :
-              pixel.includes('brevo') || pixel.includes('sendinblue') ? 'Brevo' :
-                pixel.includes('mailchimp') ? 'Mailchimp' : 'Generic';
-            console.log(`             ${i + 1}. [${source}] ${pixel.substring(0, 100)}...`);
-          });
-          console.log(`          ⏳ Loading tracking pixels...`);
-          for (const pixel of trackingPixels) {
-            await loadUrl(pixel, 'pixel');
-            await new Promise(resolve => setTimeout(resolve, 800));
+        if (!decisionRow.open_done) {
+          let openWriteOk = false;
+          try {
+            await markOpenDone(decisionRow.id);
+            openWriteOk = true;
+          } catch (e) {
+            console.log(`          ⚠️  DB error marking open_done — skipping pixel load: ${e.message}`);
           }
-          await new Promise(resolve => setTimeout(resolve, 3000));
-          console.log(`          ✅ All tracking pixels loaded!`);
-        } else {
-          console.log(`          ⚠️  No tracking pixels detected - using fallback method...`);
+          if (openWriteOk) {
+            if (trackingPixels.length > 0) {
+              console.log(`          📊 Found ${trackingPixels.length} tracking pixel(s):`);
+              trackingPixels.forEach((pixel, i) => {
+                const source = pixel.includes('hubspot') ? 'HubSpot' :
+                  pixel.includes('brevo') || pixel.includes('sendinblue') ? 'Brevo' :
+                    pixel.includes('mailchimp') ? 'Mailchimp' : 'Generic';
+                console.log(`             ${i + 1}. [${source}] ${pixel.substring(0, 100)}...`);
+              });
+              console.log(`          ⏳ Loading tracking pixels...`);
+              for (const pixel of trackingPixels) {
+                await loadUrl(pixel, 'pixel');
+                await new Promise(resolve => setTimeout(resolve, 800));
+              }
+              await new Promise(resolve => setTimeout(resolve, 3000));
+              console.log(`          ✅ All tracking pixels loaded!`);
+            } else {
+              console.log(`          ⚠️  No tracking pixels detected - using fallback method...`);
 
-          const fallbackLinks = allUrls.filter(url => {
-            const lowerUrl = url.toLowerCase();
-            return url.startsWith('http') &&
-              !lowerUrl.includes('unsubscribe') &&
-              !lowerUrl.includes('preferences');
-          });
+              const fallbackLinks = allUrls.filter(url => {
+                const lowerUrl = url.toLowerCase();
+                return url.startsWith('http') &&
+                  !lowerUrl.includes('unsubscribe') &&
+                  !lowerUrl.includes('preferences');
+              });
 
-          if (fallbackLinks.length > 0) {
-            const fallbackLink = fallbackLinks[0];
-            console.log(`          🔗 Loading fallback link to register open...`);
-            await loadUrl(fallbackLink, 'fallback-open');
-            await new Promise(resolve => setTimeout(resolve, 3000));
-          } else {
-            console.log(`          ⚠️  WARNING: No links found to register open! Email may not track.`);
+              if (fallbackLinks.length > 0) {
+                const fallbackLink = fallbackLinks[0];
+                console.log(`          🔗 Loading fallback link to register open...`);
+                await loadUrl(fallbackLink, 'fallback-open');
+                await new Promise(resolve => setTimeout(resolve, 3000));
+              } else {
+                console.log(`          ⚠️  WARNING: No links found to register open! Email may not track.`);
+              }
+            }
+            await incrementCampaignOpens(campaign.id).catch(e =>
+              console.log(`          ⚠️  inc actual_opens failed: ${e.message}`));
           }
         }
 
@@ -862,47 +994,58 @@ const processMailbox = async (mailbox, mailboxIndex = 999) => {
 
         await simulateReadTime();
 
-        if (ENABLE_CLICKS && willClick) {
-          const clickableLinks = allUrls.filter(url => {
-            const lowerUrl = url.toLowerCase();
-            return url.startsWith('http') &&
-              !lowerUrl.includes('unsubscribe') &&
-              !trackingPixels.includes(url) &&
-              !lowerUrl.includes('view-in-browser') &&
-              !lowerUrl.includes('preferences') &&
-              !lowerUrl.includes('view in browser');
-          });
-
-          const brevoClickLinks = clickableLinks.filter(url =>
-            url.includes('/mk/cl/') || url.includes('/click/')
-          );
-
-          const linksToClickFrom = brevoClickLinks.length > 0 ? brevoClickLinks : clickableLinks;
-
-          if (brevoClickLinks.length > 0) {
-            console.log(`          🎯 Found ${brevoClickLinks.length} Brevo click tracking link(s) - prioritizing these!`);
+        if (willClick && !decisionRow.click_done) {
+          let clickWriteOk = false;
+          try {
+            await markClickDone(decisionRow.id);
+            clickWriteOk = true;
+          } catch (e) {
+            console.log(`          ⚠️  DB error marking click_done — skipping click: ${e.message}`);
           }
+          if (clickWriteOk) {
+            const clickableLinks = allUrls.filter(url => {
+              const lowerUrl = url.toLowerCase();
+              return url.startsWith('http') &&
+                !lowerUrl.includes('unsubscribe') &&
+                !trackingPixels.includes(url) &&
+                !lowerUrl.includes('view-in-browser') &&
+                !lowerUrl.includes('preferences') &&
+                !lowerUrl.includes('view in browser');
+            });
 
-          if (linksToClickFrom.length > 0) {
-            const randomLink = linksToClickFrom[Math.floor(Math.random() * linksToClickFrom.length)];
+            const brevoClickLinks = clickableLinks.filter(url =>
+              url.includes('/mk/cl/') || url.includes('/click/')
+            );
 
-            console.log(`          🖱️  Clicking link...`);
+            const linksToClickFrom = brevoClickLinks.length > 0 ? brevoClickLinks : clickableLinks;
 
-            const clickDelay = Math.random() *
-              (ENGAGEMENT_CONFIG.click_delay_max - ENGAGEMENT_CONFIG.click_delay_min) +
-              ENGAGEMENT_CONFIG.click_delay_min;
-            await new Promise(resolve => setTimeout(resolve, clickDelay));
-
-            const clicked = await loadUrl(randomLink, 'click');
-            if (clicked) {
-              clickedCount++;
-              console.log(`          ✓ CLICKED (${senderEmail}): ${randomLink.substring(0, 80)}...`);
-              await new Promise(resolve => setTimeout(resolve, 2000));
-            } else {
-              console.log(`          ⚠️  Click failed but continuing...`);
+            if (brevoClickLinks.length > 0) {
+              console.log(`          🎯 Found ${brevoClickLinks.length} Brevo click tracking link(s) - prioritizing these!`);
             }
-          } else {
-            console.log(`          ℹ️  No clickable links found (only tracking pixels/unsubscribe)`);
+
+            if (linksToClickFrom.length > 0) {
+              const randomLink = linksToClickFrom[Math.floor(Math.random() * linksToClickFrom.length)];
+
+              console.log(`          🖱️  Clicking link...`);
+
+              const clickDelay = Math.random() *
+                (ENGAGEMENT_CONFIG.click_delay_max - ENGAGEMENT_CONFIG.click_delay_min) +
+                ENGAGEMENT_CONFIG.click_delay_min;
+              await new Promise(resolve => setTimeout(resolve, clickDelay));
+
+              const clicked = await loadUrl(randomLink, 'click');
+              if (clicked) {
+                clickedCount++;
+                await incrementCampaignClicks(campaign.id).catch(e =>
+                  console.log(`          ⚠️  inc actual_clicks failed: ${e.message}`));
+                console.log(`          ✓ CLICKED (${senderEmail}): ${randomLink.substring(0, 80)}...`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              } else {
+                console.log(`          ⚠️  Click failed but continuing...`);
+              }
+            } else {
+              console.log(`          ℹ️  No clickable links found (only tracking pixels/unsubscribe)`);
+            }
           }
         } else if (!ENABLE_CLICKS) {
           console.log(`          ℹ️  Clicks DISABLED by kill switch (mailbox ${mailboxIndex} > ${CLICK_ENABLED_UNTIL_INDEX})`);
@@ -920,6 +1063,11 @@ const processMailbox = async (mailbox, mailboxIndex = 999) => {
         } catch (labelError) {
           console.log(`          ⚠️  Label move failed: ${labelError.message}`);
         }
+
+        await markCleanupDone(decisionRow.id).catch(e =>
+          console.log(`          ⚠️  markCleanupDone failed: ${e.message}`));
+        await markDecisionProcessed(decisionRow.id).catch(e =>
+          console.log(`          ⚠️  markDecisionProcessed failed: ${e.message}`));
 
         await new Promise(resolve => setTimeout(resolve, 1000));
 
@@ -977,7 +1125,9 @@ const engageSeedlistBrevo = async () => {
     // FETCH ALL MAILBOXES FROM DATABASE
     const { data: mailboxes, error: fetchError } = await supabase
       .from('auto_responder_mailboxes')
-      .select('*');
+      .select('*')
+      .eq('is_active', true)
+      .order('email', { ascending: true });
 
     if (fetchError) {
       throw new Error(`Failed to fetch mailboxes: ${fetchError.message}`);
@@ -1007,7 +1157,7 @@ const engageSeedlistBrevo = async () => {
 
       try {
         const result = await Promise.race([
-          processMailbox(mailbox, currentIndex),
+          processMailbox(mailbox, currentIndex, mailboxes),
           new Promise((_, reject) =>
             setTimeout(() => reject(new Error('Mailbox processing timeout (3min)')), 180000)
           )
