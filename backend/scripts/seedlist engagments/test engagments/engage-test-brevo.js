@@ -1151,7 +1151,7 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
         await simulateReadTime();
 
         // STEP 3: CLICK LINKS (DB decision is the sole authority; write-before-execute)
-        if (willClick && !decisionRow.click_done) {
+        if (ENABLE_CLICKS && willClick && !decisionRow.click_done) {
           // Write BEFORE execute — prefer missed click over duplicate
           let clickWriteOk = false;
           try {

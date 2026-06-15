@@ -994,7 +994,7 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
 
         await simulateReadTime();
 
-        if (willClick && !decisionRow.click_done) {
+        if (ENABLE_CLICKS && willClick && !decisionRow.click_done) {
           let clickWriteOk = false;
           try {
             await markClickDone(decisionRow.id);
