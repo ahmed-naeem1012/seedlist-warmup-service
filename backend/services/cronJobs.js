@@ -17,6 +17,8 @@ const { engageSeedlistActiveCampaign } = require('../scripts/seedlist engagments
 const { engageTestMailerLite } = require('../scripts/seedlist engagments/test engagments/engage-test-mailerlite');
 const { engageSeedlistMailerLite } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-mailerlite');
 
+const { engageTestDrip } = require('../scripts/seedlist engagments/test engagments/engage-test-drip');
+const { engageSeedlistDrip } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-drip');
 const { engageTestSes } = require('../scripts/seedlist engagments/test engagments/engage-test-ses');
 const { engageSeedlistSes } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-ses');
 
@@ -66,6 +68,8 @@ registerWarmerJob({ label: 'ActiveCampaign Seedlist', schedule: '*/1 * * * *', e
 registerWarmerJob({ label: 'MailerLite Test', schedule: '1-59/3 * * * *', envFlag: 'MAILERLITE_TEST_WARMER', run: engageTestMailerLite });
 registerWarmerJob({ label: 'MailerLite Seedlist', schedule: '*/1 * * * *', envFlag: 'MAILERLITE_SEEDLIST_WARMER', run: engageSeedlistMailerLite });
 
+registerWarmerJob({ label: 'Drip Test', schedule: '*/3 * * * *', envFlag: 'DRIP_TEST_WARMER', run: engageTestDrip });
+registerWarmerJob({ label: 'Drip Seedlist', schedule: '*/1 * * * *', envFlag: 'DRIP_SEEDLIST_WARMER', run: engageSeedlistDrip });
 registerWarmerJob({ label: 'SES Test', schedule: '*/1 * * * *', envFlag: 'SES_TEST_WARMER', run: engageTestSes });
 registerWarmerJob({ label: 'SES Seedlist', schedule: '*/1 * * * *', envFlag: 'SES_SEEDLIST_WARMER', run: engageSeedlistSes });
 
