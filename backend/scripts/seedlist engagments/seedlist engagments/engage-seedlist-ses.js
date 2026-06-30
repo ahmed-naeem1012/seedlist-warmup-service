@@ -521,32 +521,30 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
           : new Date().toISOString().slice(0, 10);
         const campaignKey = buildCampaignKey(senderEmail, email.subject || '', emailDate);
 
-        let campaign, decisionRow;
+        // Campaign-memory is best-effort: if warmup_campaigns/warmup_decisions
+        // is unavailable (missing table/columns/RPCs), fall back to a local
+        // random-roll decision instead of skipping the email entirely.
+        let campaign = null, decisionRow = null;
         try {
           campaign    = await getOrCreateCampaign(campaignKey, senderEmail,
                           email.subject || '', emailDate, allMailboxes);
           decisionRow = await getDecision(campaign.id, mailbox.email);
         } catch (dbErr) {
-          console.log(`          ⚠️  DB error fetching campaign/decision — skipping: ${dbErr.message}`);
-          continue;
-        }
-        if (!decisionRow) {
-          console.log(`          ⚠️  No decision row found — skipping`);
-          continue;
+          console.log(`          ⚠️  Campaign-memory unavailable (${dbErr.message}) — using local random-roll engagement`);
         }
 
-        if (decisionRow.processed) {
+        if (decisionRow?.processed) {
           console.log(`          ✅ Already fully processed — archiving`);
           await markEmailAsRead(mailbox, email.uid);
           try { await moveToMaxifyLabel(mailbox, email.uid); } catch (e) {}
           continue;
         }
 
-        const willOpen  = decisionRow.decision !== 'skip';
-        const willClick = decisionRow.decision === 'click';
+        const willOpen  = decisionRow ? decisionRow.decision !== 'skip' : Math.random() < ENGAGEMENT_CONFIG.open_rate;
+        const willClick = decisionRow ? decisionRow.decision === 'click' : Math.random() < ENGAGEMENT_CONFIG.click_rate;
 
         if (!willOpen) {
-          console.log(`          ❌ Not engaged (decision: skip)`);
+          console.log(`          ❌ Not engaged (skip)`);
           await markEmailAsRead(mailbox, email.uid);
           try {
             await moveToMaxifyLabel(mailbox, email.uid);
@@ -554,10 +552,12 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
           } catch (labelError) {
             console.log(`          ⚠️  Archive failed: ${labelError.message}`);
           }
-          await markCleanupDone(decisionRow.id).catch(e =>
-            console.log(`          ⚠️  markCleanupDone failed: ${e.message}`));
-          await markDecisionProcessed(decisionRow.id).catch(e =>
-            console.log(`          ⚠️  markDecisionProcessed failed: ${e.message}`));
+          if (decisionRow) {
+            await markCleanupDone(decisionRow.id).catch(e =>
+              console.log(`          ⚠️  markCleanupDone failed: ${e.message}`));
+            await markDecisionProcessed(decisionRow.id).catch(e =>
+              console.log(`          ⚠️  markDecisionProcessed failed: ${e.message}`));
+          }
           continue;
         }
 
@@ -571,74 +571,70 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
           return isSesTracker && isNotClickTracker;
         });
 
-        if (!decisionRow.open_done) {
-          let openWriteOk = false;
-          try {
-            await markOpenDone(decisionRow.id);
-            openWriteOk = true;
-          } catch (e) {
-            console.log(`          ⚠️  DB error marking open_done — skipping pixel load: ${e.message}`);
+        const needsOpenLoad = decisionRow ? !decisionRow.open_done : true;
+        if (needsOpenLoad) {
+          if (decisionRow) {
+            await markOpenDone(decisionRow.id).catch(e =>
+              console.log(`          ⚠️  markOpenDone failed (continuing anyway): ${e.message}`));
           }
-          if (openWriteOk) {
-            let openFired = false;
-            let openUrl = null;
-            if (trackingPixels.length > 0) {
-              for (const pixel of trackingPixels) {
-                const fired = await loadUrl(pixel, 'pixel');
-                if (fired) { openFired = true; openUrl = pixel; }
-                await new Promise(resolve => setTimeout(resolve, 800));
-              }
-              await new Promise(resolve => setTimeout(resolve, 3000));
-            } else {
-              const fallback = allUrls.find(url => url.startsWith('http') && !url.toLowerCase().includes('unsubscribe'));
-              if (fallback) {
-                openFired = await fireTrackingUrl(fallback);
-                if (openFired) openUrl = fallback;
-                await new Promise(resolve => setTimeout(resolve, 3000));
-              }
+          let openFired = false;
+          let openUrl = null;
+          if (trackingPixels.length > 0) {
+            for (const pixel of trackingPixels) {
+              const fired = await loadUrl(pixel, 'pixel');
+              if (fired) { openFired = true; openUrl = pixel; }
+              await new Promise(resolve => setTimeout(resolve, 800));
             }
-            if (openFired) {
-              const openDomain = (() => { try { return new URL(openUrl).hostname; } catch { return openUrl; } })();
-              console.log(`          ✓ OPENED — ${email.subject} [pixel: ${openDomain}]`);
+            await new Promise(resolve => setTimeout(resolve, 3000));
+          } else {
+            const fallback = allUrls.find(url => url.startsWith('http') && !url.toLowerCase().includes('unsubscribe'));
+            if (fallback) {
+              openFired = await fireTrackingUrl(fallback);
+              if (openFired) openUrl = fallback;
+              await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+          }
+          if (openFired) {
+            const openDomain = (() => { try { return new URL(openUrl).hostname; } catch { return openUrl; } })();
+            console.log(`          ✓ OPENED — ${email.subject} [pixel: ${openDomain}]`);
+            if (campaign) {
               await incrementCampaignOpens(campaign.id).catch(e =>
                 console.log(`          ⚠️  inc actual_opens failed: ${e.message}`));
-            } else {
-              console.log(`          ✗ OPEN FAILED — ${email.subject}`);
             }
+          } else {
+            console.log(`          ✗ OPEN FAILED — ${email.subject}`);
           }
         }
 
         openedCount++;
         await simulateReadTime();
 
-        if (ENABLE_CLICKS && willClick && !decisionRow.click_done) {
-          let clickWriteOk = false;
-          try {
-            await markClickDone(decisionRow.id);
-            clickWriteOk = true;
-          } catch (e) {
-            console.log(`          ⚠️  DB error marking click_done — skipping click: ${e.message}`);
+        const needsClickLoad = ENABLE_CLICKS && willClick && (decisionRow ? !decisionRow.click_done : true);
+        if (needsClickLoad) {
+          if (decisionRow) {
+            await markClickDone(decisionRow.id).catch(e =>
+              console.log(`          ⚠️  markClickDone failed (continuing anyway): ${e.message}`));
           }
-          if (clickWriteOk) {
-            const clickableLinks = allUrls.filter((url) =>
-              url.startsWith('http') &&
-              !url.toLowerCase().includes('unsubscribe') &&
-              !trackingPixels.includes(url));
-            const sesClickLinks = clickableLinks.filter((url) => {
-              const lowerUrl = url.toLowerCase();
-              return lowerUrl.includes('awstrack.me') && lowerUrl.includes('/trk/click');
-            });
-            const linksToClickFrom = sesClickLinks.length > 0 ? sesClickLinks : clickableLinks;
-            if (linksToClickFrom.length > 0) {
-              const randomLink = linksToClickFrom[Math.floor(Math.random() * linksToClickFrom.length)];
-              await new Promise(resolve => setTimeout(resolve, Math.random() * (ENGAGEMENT_CONFIG.click_delay_max - ENGAGEMENT_CONFIG.click_delay_min) + ENGAGEMENT_CONFIG.click_delay_min));
-              const clicked = await loadUrl(randomLink, 'click');
-              if (clicked) {
-                clickedCount++;
+          const clickableLinks = allUrls.filter((url) =>
+            url.startsWith('http') &&
+            !url.toLowerCase().includes('unsubscribe') &&
+            !trackingPixels.includes(url));
+          const sesClickLinks = clickableLinks.filter((url) => {
+            const lowerUrl = url.toLowerCase();
+            return lowerUrl.includes('awstrack.me') && lowerUrl.includes('/trk/click');
+          });
+          const linksToClickFrom = sesClickLinks.length > 0 ? sesClickLinks : clickableLinks;
+          if (linksToClickFrom.length > 0) {
+            const randomLink = linksToClickFrom[Math.floor(Math.random() * linksToClickFrom.length)];
+            await new Promise(resolve => setTimeout(resolve, Math.random() * (ENGAGEMENT_CONFIG.click_delay_max - ENGAGEMENT_CONFIG.click_delay_min) + ENGAGEMENT_CONFIG.click_delay_min));
+            const clicked = await loadUrl(randomLink, 'click');
+            if (clicked) {
+              clickedCount++;
+              if (campaign) {
                 await incrementCampaignClicks(campaign.id).catch(e =>
                   console.log(`          ⚠️  inc actual_clicks failed: ${e.message}`));
-                await new Promise(resolve => setTimeout(resolve, 2000));
               }
+              await new Promise(resolve => setTimeout(resolve, 2000));
             }
           }
         }
@@ -647,10 +643,12 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
         await markEmailAsRead(mailbox, email.uid);
         try { await moveToMaxifyLabel(mailbox, email.uid); } catch (e) { }
 
-        await markCleanupDone(decisionRow.id).catch(e =>
-          console.log(`          ⚠️  markCleanupDone failed: ${e.message}`));
-        await markDecisionProcessed(decisionRow.id).catch(e =>
-          console.log(`          ⚠️  markDecisionProcessed failed: ${e.message}`));
+        if (decisionRow) {
+          await markCleanupDone(decisionRow.id).catch(e =>
+            console.log(`          ⚠️  markCleanupDone failed: ${e.message}`));
+          await markDecisionProcessed(decisionRow.id).catch(e =>
+            console.log(`          ⚠️  markDecisionProcessed failed: ${e.message}`));
+        }
 
         await new Promise(resolve => setTimeout(resolve, 1000));
       } catch (emailError) {
