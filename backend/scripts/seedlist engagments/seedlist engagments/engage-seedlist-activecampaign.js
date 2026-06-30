@@ -40,6 +40,7 @@ const MAX_PUPPETEER_PAGES = parseInt(process.env.PUPPETEER_PAGE_POOL_SIZE || '30
 const MAILBOX_TIMEOUT_MS = parseInt(process.env.SEEDLIST_MAILBOX_TIMEOUT_MS || '1200000');
 
 let globalBrowser = null;
+const campaignCache = new Map();
 
 const getBrowser = async () => {
   if (!globalBrowser) {
@@ -162,6 +163,95 @@ const simulateReadTime = async () => {
   await new Promise(resolve => setTimeout(resolve, delay));
 };
 
+// ─── Campaign-level idempotency helpers ───────────────────────────────────────
+
+const buildCampaignKey = (senderEmail, subject, date) => {
+  const raw = `${senderEmail}||${subject}||${date}`;
+  return require('crypto').createHash('sha256').update(raw).digest('hex');
+};
+
+const fisherYates = (array) => {
+  const arr = [...array];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+};
+
+const getOrCreateCampaign = async (campaignKey, senderEmail, subject, date, allMailboxes) => {
+  if (campaignCache.has(campaignKey)) return campaignCache.get(campaignKey);
+
+  const { data: existing } = await supabase
+    .from('warmup_campaigns').select('*').eq('campaign_key', campaignKey).maybeSingle();
+  if (existing) { campaignCache.set(campaignKey, existing); return existing; }
+
+  const total        = allMailboxes.length;
+  const openRate     = [0.48, 0.55, 0.60][Math.floor(Math.random() * 3)];
+  const clickRate    = [0.10, 0.20, 0.30, 0.35][Math.floor(Math.random() * 4)];
+  const targetOpens  = Math.round(total * openRate);
+  const targetClicks = Math.round(targetOpens * clickRate);
+
+  const { data: campaign, error: insertError } = await supabase
+    .from('warmup_campaigns')
+    .insert({ campaign_key: campaignKey, provider: 'activecampaign', sender_email: senderEmail,
+              subject, campaign_date: date, total_mailboxes: total,
+              target_open_rate: openRate, target_click_rate: clickRate,
+              target_opens: targetOpens, target_clicks: targetClicks })
+    .select().single();
+
+  if (insertError) {
+    const { data: raceWinner, error: fetchError } = await supabase
+      .from('warmup_campaigns').select('*').eq('campaign_key', campaignKey).single();
+    if (fetchError || !raceWinner) throw fetchError || new Error('Campaign race fetch failed');
+    campaignCache.set(campaignKey, raceWinner);
+    return raceWinner;
+  }
+
+  const shuffled  = fisherYates(allMailboxes);
+  const decisions = shuffled.map((mb, i) => ({
+    campaign_id:   campaign.id,
+    mailbox_email: mb.email,
+    decision:      i < targetClicks ? 'click' : i < targetOpens ? 'open' : 'skip',
+  }));
+  await supabase.from('warmup_decisions').insert(decisions);
+
+  campaignCache.set(campaignKey, campaign);
+  return campaign;
+};
+
+const getDecision = async (campaignId, mailboxEmail) => {
+  const { data, error } = await supabase
+    .from('warmup_decisions').select('*')
+    .eq('campaign_id', campaignId).eq('mailbox_email', mailboxEmail).single();
+  if (error) throw error;
+  return data;
+};
+
+const markOpenDone = async (id) => {
+  const { error } = await supabase.from('warmup_decisions').update({ open_done: true }).eq('id', id);
+  if (error) throw error;
+};
+const markClickDone = async (id) => {
+  const { error } = await supabase.from('warmup_decisions').update({ click_done: true }).eq('id', id);
+  if (error) throw error;
+};
+
+const markCleanupDone = async (id) => {
+  const { error } = await supabase.from('warmup_decisions').update({ cleanup_done: true }).eq('id', id);
+  if (error) throw error;
+};
+const markDecisionProcessed = async (id) => {
+  const { error } = await supabase.from('warmup_decisions')
+    .update({ processed: true, processed_at: new Date().toISOString() }).eq('id', id);
+  if (error) throw error;
+};
+
+const incrementCampaignOpens  = (id) => supabase.rpc('inc_campaign_opens',  { p_id: id });
+const incrementCampaignClicks = (id) => supabase.rpc('inc_campaign_clicks', { p_id: id });
+
+// ──────────────────────────────────────────────────────────────────────────────
+
 const markEmailAsRead = async (mailbox, uid) => {
   if (!uid) return;
   return new Promise((resolve, reject) => {
@@ -237,7 +327,7 @@ const checkPromotionsAndMove = async (mailbox, checkReadEmails = false) => {
   } catch (error) { return 0; }
 };
 
-const processMailbox = async (mailbox, mailboxIndex = 999) => {
+const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) => {
   const ENABLE_CLICKS = mailboxIndex <= CLICK_ENABLED_UNTIL_INDEX;
   const checkReadEmails = shouldCheckReadEmails(mailbox.email);
 
@@ -280,18 +370,66 @@ const processMailbox = async (mailbox, mailboxIndex = 999) => {
 
     for (const email of emails) {
       try {
-        if (getEmailAgeHours(email.date) > MAX_EMAIL_AGE_HOURS) {
+        const senderEmail = email.from?.value?.[0]?.address || email.from?.text;
+
+        const emailAgeHours = getEmailAgeHours(email.date);
+        if (emailAgeHours > MAX_EMAIL_AGE_HOURS) {
+          console.log(`          Email is ${emailAgeHours.toFixed(1)}h old (>${MAX_EMAIL_AGE_HOURS}h) - SKIPPING`);
           await markEmailAsRead(mailbox, email.uid);
-          try { await moveToMaxifyLabel(mailbox, email.uid); } catch (e) { }
-          continue;
-        }
-        if (Math.random() >= ENGAGEMENT_CONFIG.open_rate) {
-          await markEmailAsRead(mailbox, email.uid);
-          try { await moveToMaxifyLabel(mailbox, email.uid); } catch (e) { }
+          try {
+            await moveToMaxifyLabel(mailbox, email.uid);
+            console.log(`          📁 Moved to "Maxify's Label" (skipped - too old)`);
+          } catch (labelError) {
+            console.log(`          ⚠️  Label move failed: ${labelError.message}`);
+          }
           continue;
         }
 
-        const willClick = Math.random() < ENGAGEMENT_CONFIG.click_rate;
+        const emailDate = email.date
+          ? new Date(email.date).toISOString().slice(0, 10)
+          : new Date().toISOString().slice(0, 10);
+        const campaignKey = buildCampaignKey(senderEmail, email.subject || '', emailDate);
+
+        let campaign, decisionRow;
+        try {
+          campaign    = await getOrCreateCampaign(campaignKey, senderEmail,
+                          email.subject || '', emailDate, allMailboxes);
+          decisionRow = await getDecision(campaign.id, mailbox.email);
+        } catch (dbErr) {
+          console.log(`          ⚠️  DB error fetching campaign/decision — skipping: ${dbErr.message}`);
+          continue;
+        }
+        if (!decisionRow) {
+          console.log(`          ⚠️  No decision row found — skipping`);
+          continue;
+        }
+
+        if (decisionRow.processed) {
+          console.log(`          ✅ Already fully processed — archiving`);
+          await markEmailAsRead(mailbox, email.uid);
+          try { await moveToMaxifyLabel(mailbox, email.uid); } catch (e) {}
+          continue;
+        }
+
+        const willOpen  = decisionRow.decision !== 'skip';
+        const willClick = decisionRow.decision === 'click';
+
+        if (!willOpen) {
+          console.log(`          ❌ Not engaged (decision: skip)`);
+          await markEmailAsRead(mailbox, email.uid);
+          try {
+            await moveToMaxifyLabel(mailbox, email.uid);
+            console.log(`          📁 Moved to "Maxify's Label" (not engaged)`);
+          } catch (labelError) {
+            console.log(`          ⚠️  Archive failed: ${labelError.message}`);
+          }
+          await markCleanupDone(decisionRow.id).catch(e =>
+            console.log(`          ⚠️  markCleanupDone failed: ${e.message}`));
+          await markDecisionProcessed(decisionRow.id).catch(e =>
+            console.log(`          ⚠️  markDecisionProcessed failed: ${e.message}`));
+          continue;
+        }
+
         const allUrls = extractAllUrls(email.text, email.html);
 
         // ── ACTIVECAMPAIGN-ONLY tracking pixel detection ──────────────
@@ -303,32 +441,70 @@ const processMailbox = async (mailbox, mailboxIndex = 999) => {
           );
         });
 
-        if (trackingPixels.length > 0) {
-          for (const pixel of trackingPixels) { await loadUrl(pixel, 'pixel'); await new Promise(resolve => setTimeout(resolve, 800)); }
-          await new Promise(resolve => setTimeout(resolve, 3000));
-        } else {
-          const fallback = allUrls.find(url => url.startsWith('http') && !url.toLowerCase().includes('unsubscribe'));
-          if (fallback) { await loadUrl(fallback, 'fallback-open'); await new Promise(resolve => setTimeout(resolve, 3000)); }
+        if (!decisionRow.open_done) {
+          let openWriteOk = false;
+          try {
+            await markOpenDone(decisionRow.id);
+            openWriteOk = true;
+          } catch (e) {
+            console.log(`          ⚠️  DB error marking open_done — skipping pixel load: ${e.message}`);
+          }
+          if (openWriteOk) {
+            if (trackingPixels.length > 0) {
+              for (const pixel of trackingPixels) { await loadUrl(pixel, 'pixel'); await new Promise(resolve => setTimeout(resolve, 800)); }
+              await new Promise(resolve => setTimeout(resolve, 3000));
+            } else {
+              const fallback = allUrls.find(url => url.startsWith('http') && !url.toLowerCase().includes('unsubscribe'));
+              if (fallback) { await loadUrl(fallback, 'fallback-open'); await new Promise(resolve => setTimeout(resolve, 3000)); }
+            }
+            await incrementCampaignOpens(campaign.id).catch(e =>
+              console.log(`          ⚠️  inc actual_opens failed: ${e.message}`));
+          }
         }
 
         openedCount++;
         await simulateReadTime();
 
-        if (ENABLE_CLICKS && willClick) {
-          const clickableLinks = allUrls.filter(url => url.startsWith('http') && !url.toLowerCase().includes('unsubscribe') && !trackingPixels.includes(url));
-          const acClickLinks = clickableLinks.filter(url => url.toLowerCase().includes('activehosted.com') || url.toLowerCase().includes('ac-track.com'));
-          const linksToClickFrom = acClickLinks.length > 0 ? acClickLinks : clickableLinks;
-          if (linksToClickFrom.length > 0) {
-            const randomLink = linksToClickFrom[Math.floor(Math.random() * linksToClickFrom.length)];
-            await new Promise(resolve => setTimeout(resolve, Math.random() * (ENGAGEMENT_CONFIG.click_delay_max - ENGAGEMENT_CONFIG.click_delay_min) + ENGAGEMENT_CONFIG.click_delay_min));
-            const clicked = await loadUrl(randomLink, 'click');
-            if (clicked) { clickedCount++; await new Promise(resolve => setTimeout(resolve, 2000)); }
+        if (ENABLE_CLICKS && willClick && !decisionRow.click_done) {
+          let clickWriteOk = false;
+          try {
+            await markClickDone(decisionRow.id);
+            clickWriteOk = true;
+          } catch (e) {
+            console.log(`          ⚠️  DB error marking click_done — skipping click: ${e.message}`);
+          }
+          if (clickWriteOk) {
+            const clickableLinks = allUrls.filter(url => url.startsWith('http') && !url.toLowerCase().includes('unsubscribe') && !trackingPixels.includes(url));
+            const acClickLinks = clickableLinks.filter(url => url.toLowerCase().includes('activehosted.com') || url.toLowerCase().includes('ac-track.com'));
+            const linksToClickFrom = acClickLinks.length > 0 ? acClickLinks : clickableLinks;
+            if (linksToClickFrom.length > 0) {
+              const randomLink = linksToClickFrom[Math.floor(Math.random() * linksToClickFrom.length)];
+              await new Promise(resolve => setTimeout(resolve, Math.random() * (ENGAGEMENT_CONFIG.click_delay_max - ENGAGEMENT_CONFIG.click_delay_min) + ENGAGEMENT_CONFIG.click_delay_min));
+              const clicked = await loadUrl(randomLink, 'click');
+              if (clicked) {
+                clickedCount++;
+                await incrementCampaignClicks(campaign.id).catch(e =>
+                  console.log(`          ⚠️  inc actual_clicks failed: ${e.message}`));
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              }
+            }
           }
         }
 
         await new Promise(resolve => setTimeout(resolve, 2000));
         await markEmailAsRead(mailbox, email.uid);
-        try { await moveToMaxifyLabel(mailbox, email.uid); } catch (e) { }
+        try {
+          await moveToMaxifyLabel(mailbox, email.uid);
+          console.log(`          📁 Moved to "Maxify's Label"`);
+        } catch (labelError) {
+          console.log(`          ⚠️  Label move failed: ${labelError.message}`);
+        }
+
+        await markCleanupDone(decisionRow.id).catch(e =>
+          console.log(`          ⚠️  markCleanupDone failed: ${e.message}`));
+        await markDecisionProcessed(decisionRow.id).catch(e =>
+          console.log(`          ⚠️  markDecisionProcessed failed: ${e.message}`));
+
         await new Promise(resolve => setTimeout(resolve, 1000));
       } catch (emailError) {
         console.error(`          Error:`, emailError.message);
@@ -364,7 +540,7 @@ const engageSeedlistActiveCampaign = async () => {
           console.log(`\n[${currentIndex}/${mailboxes.length}] ${mailbox.email}`);
           try {
             const result = await Promise.race([
-              processMailbox(mailbox, currentIndex),
+              processMailbox(mailbox, currentIndex, mailboxes),
               new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout (${MAILBOX_TIMEOUT_MS / 1000}s)`)), MAILBOX_TIMEOUT_MS))
             ]);
             if (result.found > 0) {
