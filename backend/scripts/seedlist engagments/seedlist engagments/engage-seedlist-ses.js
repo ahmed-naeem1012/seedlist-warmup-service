@@ -93,7 +93,7 @@ const CLICK_ENABLED_UNTIL_INDEX = 730;
 
 const ENGAGEMENT_CONFIG = {
   open_rate: 0.95,
-  click_rate: 0.80,
+  click_rate: 0.10,
   read_time_min: 5000,
   read_time_max: 10000,
   click_delay_min: 2000,
@@ -105,7 +105,7 @@ const shouldCheckReadEmails = () => true;
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY
-, { realtime: { transport: ws } }
+  , { realtime: { transport: ws } }
 );
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
@@ -290,18 +290,20 @@ const getOrCreateCampaign = async (campaignKey, senderEmail, subject, date, allM
     .from('warmup_campaigns').select('*').eq('campaign_key', campaignKey).maybeSingle();
   if (existing) { campaignCache.set(campaignKey, existing); return existing; }
 
-  const total        = allMailboxes.length;
-  const openRate     = [0.48, 0.55, 0.60][Math.floor(Math.random() * 3)];
-  const clickRate    = [0.10, 0.20, 0.30, 0.35][Math.floor(Math.random() * 4)];
-  const targetOpens  = Math.round(total * openRate);
+  const total = allMailboxes.length;
+  const openRate = [0.48, 0.55, 0.60][Math.floor(Math.random() * 3)];
+  const clickRate = [0.10, 0.20, 0.30, 0.35][Math.floor(Math.random() * 4)];
+  const targetOpens = Math.round(total * openRate);
   const targetClicks = Math.round(targetOpens * clickRate);
 
   const { data: campaign, error: insertError } = await supabase
     .from('warmup_campaigns')
-    .insert({ campaign_key: campaignKey, provider: 'ses', sender_email: senderEmail,
-              subject, campaign_date: date, total_mailboxes: total,
-              target_open_rate: openRate, target_click_rate: clickRate,
-              target_opens: targetOpens, target_clicks: targetClicks })
+    .insert({
+      campaign_key: campaignKey, provider: 'ses', sender_email: senderEmail,
+      subject, campaign_date: date, total_mailboxes: total,
+      target_open_rate: openRate, target_click_rate: clickRate,
+      target_opens: targetOpens, target_clicks: targetClicks
+    })
     .select().single();
 
   if (insertError) {
@@ -312,11 +314,11 @@ const getOrCreateCampaign = async (campaignKey, senderEmail, subject, date, allM
     return raceWinner;
   }
 
-  const shuffled  = fisherYates(allMailboxes);
+  const shuffled = fisherYates(allMailboxes);
   const decisions = shuffled.map((mb, i) => ({
-    campaign_id:   campaign.id,
+    campaign_id: campaign.id,
     mailbox_email: mb.email,
-    decision:      i < targetClicks ? 'click' : i < targetOpens ? 'open' : 'skip',
+    decision: i < targetClicks ? 'click' : i < targetOpens ? 'open' : 'skip',
   }));
   await supabase.from('warmup_decisions').insert(decisions);
 
@@ -351,7 +353,7 @@ const markDecisionProcessed = async (id) => {
   if (error) throw error;
 };
 
-const incrementCampaignOpens  = (id) => supabase.rpc('inc_campaign_opens',  { p_id: id });
+const incrementCampaignOpens = (id) => supabase.rpc('inc_campaign_opens', { p_id: id });
 const incrementCampaignClicks = (id) => supabase.rpc('inc_campaign_clicks', { p_id: id });
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -526,8 +528,8 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
         // random-roll decision instead of skipping the email entirely.
         let campaign = null, decisionRow = null;
         try {
-          campaign    = await getOrCreateCampaign(campaignKey, senderEmail,
-                          email.subject || '', emailDate, allMailboxes);
+          campaign = await getOrCreateCampaign(campaignKey, senderEmail,
+            email.subject || '', emailDate, allMailboxes);
           decisionRow = await getDecision(campaign.id, mailbox.email);
         } catch (dbErr) {
           console.log(`          ⚠️  Campaign-memory unavailable (${dbErr.message}) — using local random-roll engagement`);
@@ -536,11 +538,11 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
         if (decisionRow?.processed) {
           console.log(`          ✅ Already fully processed — archiving`);
           await markEmailAsRead(mailbox, email.uid);
-          try { await moveToMaxifyLabel(mailbox, email.uid); } catch (e) {}
+          try { await moveToMaxifyLabel(mailbox, email.uid); } catch (e) { }
           continue;
         }
 
-        const willOpen  = decisionRow ? decisionRow.decision !== 'skip' : Math.random() < ENGAGEMENT_CONFIG.open_rate;
+        const willOpen = decisionRow ? decisionRow.decision !== 'skip' : Math.random() < ENGAGEMENT_CONFIG.open_rate;
         const willClick = decisionRow ? decisionRow.decision === 'click' : Math.random() < ENGAGEMENT_CONFIG.click_rate;
 
         if (!willOpen) {
