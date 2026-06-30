@@ -7,17 +7,120 @@ const puppeteer = require('puppeteer');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '..', '..', '.env') });
 
-// TODO: Set your Mailchimp sender address(es) before enabling MAILCHIMP_SEEDLIST_WARMER
-const TARGET_SENDERS = [
-  // 'your-mailchimp-sender@example.com',
+const TEST_EMAILS = [
+  'geografyesfrageer@gmail.com',
+  'austineromero246@gmail.com',
+  'uthandaesdarmier@gmail.com',
+  'elierberryes36@gmail.com',
+  'wadanthony09@gmail.com',
+  'jeksiclodiidi@gmail.com',
+  'danillajulier@gmail.com',
+  'manfollarquwkeep@gmail.com',
+  'barrettesdchristophered@gmail.com',
+  'watkinesejasoneds@gmail.com',
+  'jeremebenneth@gmail.com',
+  'nathanerreaides@gmail.com',
+  'fullsdeeppardhanco@gmail.com',
+  'robiniyeresakom@gmail.com',
+  'jertyparkar@gmail.com',
+  'joerobertdon0@gmail.com',
+  'devidsonesjosever@gmail.com',
+  'rightersootes@gmail.com',
+  'amibhaidesai709@gmail.com',
+  'thomaszdaszews@gmail.com',
+  'numberfeeding@gmail.com',
+  'geokavageonaca@gmail.com',
+  'debkalisosk@gmail.com',
+  'veokavsdvsokavwcs@gmail.com',
+  'tsushimajdjfhf8@gmail.com',
+  'checkhshs73@gmail.com',
+  'gsowijebxsgaousnc@gmail.com',
+  'rhagsgldjdhd7@gmail.com',
+  'comingfun151@gmail.com',
+  'formriding@gmail.com',
+  'gueye040483@gmail.com',
+  'p85113035@gmail.com',
+  'umeshpujar612@gmail.com',
+  'scottstaylor691@gmail.com',
+  'sd6253463@gmail.com',
+  'dtrfyte@gmail.com',
+  'rameshmohacha@gmail.com',
+  'jesonsmith6273@gmail.com',
+  'taniyamondal7899@gmail.com',
+  'rameshbmramesh19670@gmail.com',
+  'wadud5189@gmail.com',
+  'sidindiaye9734842@gmail.com',
+  'jameershaikhshaikh39@gmail.com',
+  'p64200291@gmail.com',
+  'ziddim76590@gmail.com',
+  'sambuharijan38@gmail.com',
+  'shivamyadavpatepur233235@gmail.com',
+  'seerila346@gmail.com',
+  'insadrame82@gmail.com',
+  'barrylongbalaoxhswpsnal85291@gmail.com',
+  'charleehale30@gmail.com',
+  'carolinekolly555@gmail.com',
+  'aqibewequfu11@gmail.com',
+  'awexoxikew47@gmail.com',
+  'hffg46dd@gmail.com',
+  'shoheiohtani83@gmail.com',
+  'alfinoalbarez564@gmail.com',
+  'jon@tryameloa.com',
+  'jada@putdelivra.com',
+  'jada@nowdelivra.com',
+  'jada@buymyuselybase.com',
+  'sadie@rundelivra.com',
+  'mitch@setameloa.com',
+  'jay@tagameloa.com',
+  'becca@getmyusely.com',
+  'henri@tagameloa.com',
+  'mitch@putdelivra.com',
+  'jada@heyzmyuser.com',
+  'mia@makedelivra.com',
+  'sadie@sendmyusely.com',
+  'arielle@buydelivra.com',
+  'sadie@whymyusers.com',
+  'jay@buydelivra.com',
+  'max@sendameloa.com',
+  'jay@aimameloa.com',
+  'henri@letmyusely.com',
+  'ivy@bestmyusers.com',
+  'jace@itsmyuserly.com',
+  'leo@askmyusers.com',
+  'jace@trymyusely.com',
+  'henri@gomyuserly.com',
+  'henri@pickmyuselyhq.com',
+  'arielle@pickmyuselyflow.com',
+  'jon@putmyuselyapp.com',
+  'sadie@themyuserly.com',
+  'jada@permyuserly.com',
+  'mitch@findmyuselyport.com',
+  'eli@addmyuselylabs.com',
+  'becca@ourmyuserly.com',
+  'max@buymyuselylink.com',
+  'zach@putmyuselyapp.com',
+  'leo@saymyuserly.com',
+  'gia@viewmyusers.com',
+  'jada@pickmyuserly.com',
+  'leo@allmyuserly.com',
+  'zoe@joinmyuselyteam.com',
+  'max@heymyusers.com',
+  'jada@addmyuselyflow.com',
+  'eli@addmyuselydev.com',
+  'becca@putmyuselysync.com'
 ];
 
-const MAX_EMAIL_AGE_HOURS = 240;
-const CLICK_ENABLED_UNTIL_INDEX = 730;
+// TODO: Set your SES sender address(es) before enabling SES_TEST_WARMER
+const TARGET_SENDERS = [
+  'abdullahamir1010@gmail.com'
+];
+
+const MAX_EMAIL_AGE_HOURS = 1;
+const CLICK_ENABLED_UNTIL_INDEX = 82;
 
 const ENGAGEMENT_CONFIG = {
-  open_rate: 0.95,
-  click_rate: 0.80,
+  open_rate: 0.75,
+  click_rate: 0.10,
   read_time_min: 5000,
   read_time_max: 10000,
   click_delay_min: 2000,
@@ -34,9 +137,9 @@ const supabase = createClient(
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
-const WORKER_CONCURRENCY = parseInt(process.env.SEEDLIST_WORKER_CONCURRENCY || '50');
-const MAX_PUPPETEER_PAGES = parseInt(process.env.PUPPETEER_PAGE_POOL_SIZE || '30');
-const MAILBOX_TIMEOUT_MS = parseInt(process.env.SEEDLIST_MAILBOX_TIMEOUT_MS || '1200000');
+const WORKER_CONCURRENCY = parseInt(process.env.SEEDLIST_WORKER_CONCURRENCY || '25');
+const MAX_PUPPETEER_PAGES = parseInt(process.env.PUPPETEER_PAGE_POOL_SIZE || '15');
+const MAILBOX_TIMEOUT_MS = 90000;
 
 let globalBrowser = null;
 const campaignCache = new Map();
@@ -193,7 +296,7 @@ const getOrCreateCampaign = async (campaignKey, senderEmail, subject, date, allM
 
   const { data: campaign, error: insertError } = await supabase
     .from('warmup_campaigns')
-    .insert({ campaign_key: campaignKey, provider: 'mailchimp', sender_email: senderEmail,
+    .insert({ campaign_key: campaignKey, provider: 'ses', sender_email: senderEmail,
               subject, campaign_date: date, total_mailboxes: total,
               target_open_rate: openRate, target_click_rate: clickRate,
               target_opens: targetOpens, target_clicks: targetClicks })
@@ -329,8 +432,12 @@ const checkPromotionsAndMove = async (mailbox, checkReadEmails = false) => {
 const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) => {
   const ENABLE_CLICKS = mailboxIndex <= CLICK_ENABLED_UNTIL_INDEX;
   const checkReadEmails = shouldCheckReadEmails(mailbox.email);
+  if (checkReadEmails) console.log(`   📖 "USE" MAILBOX DETECTED`);
+  console.log(`   Clicks ${ENABLE_CLICKS ? 'ENABLED' : 'DISABLED'} (${mailboxIndex}/${CLICK_ENABLED_UNTIL_INDEX})`);
 
+  console.log(`    Checking SPAM folder...`);
   const movedFromSpam = await checkSpamAndMove(mailbox, checkReadEmails);
+  console.log(`    Checking PROMOTIONS folder...`);
   const movedFromPromotions = await checkPromotionsAndMove(mailbox, checkReadEmails);
   if (movedFromSpam + movedFromPromotions > 0) { await new Promise(resolve => setTimeout(resolve, 5000)); }
 
@@ -370,8 +477,10 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
     for (const email of emails) {
       try {
         const senderEmail = email.from?.value?.[0]?.address || email.from?.text;
+        console.log(`       Campaign: ${senderEmail} | Subject: ${email.subject}`);
 
-        if (getEmailAgeHours(email.date) > MAX_EMAIL_AGE_HOURS) {
+        const emailAgeHours = getEmailAgeHours(email.date);
+        if (emailAgeHours > MAX_EMAIL_AGE_HOURS) {
           await markEmailAsRead(mailbox, email.uid);
           try { await moveToMaxifyLabel(mailbox, email.uid); } catch (e) { }
           continue;
@@ -424,16 +533,13 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
 
         const allUrls = extractAllUrls(email.text, email.html);
 
-        // ── MAILCHIMP-ONLY tracking pixel detection ───────────────────
+        // ── SES-ONLY tracking pixel detection ────────────────────────
+        // SES open tracking: awstrack.me/.../trk/open/...
+        // SES click tracking: awstrack.me/.../trk/click/...
         const trackingPixels = allUrls.filter(url => {
           const lowerUrl = url.toLowerCase();
-          const isMailchimpTracker =
-            (lowerUrl.includes('list-manage.com') && lowerUrl.includes('track/open')) ||
-            (lowerUrl.includes('mailchimp.com') && (lowerUrl.includes('track') || lowerUrl.endsWith('.gif') || lowerUrl.endsWith('.png')));
-          const isNotClickTracker =
-            !(lowerUrl.includes('list-manage.com') && lowerUrl.includes('track/click')) &&
-            !lowerUrl.includes('mailchi.mp');
-          return isMailchimpTracker && isNotClickTracker;
+          const isSesTracker = lowerUrl.includes('awstrack.me') && lowerUrl.includes('/trk/open');
+          return isSesTracker;
         });
 
         if (!decisionRow.open_done) {
@@ -446,11 +552,12 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
           }
           if (openWriteOk) {
             if (trackingPixels.length > 0) {
+              console.log(`          📊 Found ${trackingPixels.length} SES tracking pixel(s)`);
               for (const pixel of trackingPixels) { await loadUrl(pixel, 'pixel'); await new Promise(resolve => setTimeout(resolve, 800)); }
               await new Promise(resolve => setTimeout(resolve, 3000));
             } else {
-              const fallback = allUrls.find(url => url.startsWith('http') && !url.toLowerCase().includes('unsubscribe'));
-              if (fallback) { await loadUrl(fallback, 'fallback-open'); await new Promise(resolve => setTimeout(resolve, 3000)); }
+              const fallbackLinks = allUrls.filter(url => url.startsWith('http') && !url.toLowerCase().includes('unsubscribe'));
+              if (fallbackLinks.length > 0) { await loadUrl(fallbackLinks[0], 'fallback-open'); await new Promise(resolve => setTimeout(resolve, 3000)); }
             }
             await incrementCampaignOpens(campaign.id).catch(e =>
               console.log(`          ⚠️  inc actual_opens failed: ${e.message}`));
@@ -458,6 +565,7 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
         }
 
         openedCount++;
+        console.log(`          ✓ EMAIL OPENED`);
         await simulateReadTime();
 
         if (ENABLE_CLICKS && willClick && !decisionRow.click_done) {
@@ -470,19 +578,25 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
           }
           if (clickWriteOk) {
             const clickableLinks = allUrls.filter(url => url.startsWith('http') && !url.toLowerCase().includes('unsubscribe') && !trackingPixels.includes(url));
-            const mailchimpClickLinks = clickableLinks.filter(url => {
+
+            // Prioritize SES click tracking links
+            const sesClickLinks = clickableLinks.filter(url => {
               const lowerUrl = url.toLowerCase();
-              return lowerUrl.includes('mailchi.mp') || (lowerUrl.includes('list-manage.com') && lowerUrl.includes('track/click'));
+              return lowerUrl.includes('awstrack.me') && lowerUrl.includes('/trk/click');
             });
-            const linksToClickFrom = mailchimpClickLinks.length > 0 ? mailchimpClickLinks : clickableLinks;
+            const linksToClickFrom = sesClickLinks.length > 0 ? sesClickLinks : clickableLinks;
+            if (sesClickLinks.length > 0) console.log(`          🎯 Found ${sesClickLinks.length} SES click link(s)`);
+
             if (linksToClickFrom.length > 0) {
               const randomLink = linksToClickFrom[Math.floor(Math.random() * linksToClickFrom.length)];
-              await new Promise(resolve => setTimeout(resolve, Math.random() * (ENGAGEMENT_CONFIG.click_delay_max - ENGAGEMENT_CONFIG.click_delay_min) + ENGAGEMENT_CONFIG.click_delay_min));
+              const clickDelay = Math.random() * (ENGAGEMENT_CONFIG.click_delay_max - ENGAGEMENT_CONFIG.click_delay_min) + ENGAGEMENT_CONFIG.click_delay_min;
+              await new Promise(resolve => setTimeout(resolve, clickDelay));
               const clicked = await loadUrl(randomLink, 'click');
               if (clicked) {
                 clickedCount++;
                 await incrementCampaignClicks(campaign.id).catch(e =>
                   console.log(`          ⚠️  inc actual_clicks failed: ${e.message}`));
+                console.log(`          ✓ CLICKED`);
                 await new Promise(resolve => setTimeout(resolve, 2000));
               }
             }
@@ -510,22 +624,24 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
   }
 };
 
-const engageSeedlistMailchimp = async () => {
+const engageTestSes = async () => {
   const startTime = Date.now();
   console.log('\n========================================');
-  console.log('   [MAILCHIMP] SEEDLIST ENGAGEMENT');
+  console.log('   [SES] TEST ENGAGEMENT');
   console.log('========================================\n');
 
   try {
     await getBrowser();
-    const { data: mailboxes, error: fetchError } = await supabase.from('auto_responder_mailboxes').select('*').eq('is_active', true).order('email', { ascending: true });
+    const { data: mailboxData, error: fetchError } = await supabase.from('auto_responder_mailboxes').select('*').in('email', TEST_EMAILS);
     if (fetchError) throw new Error(`Failed to fetch mailboxes: ${fetchError.message}`);
+
+    const mailboxes = TEST_EMAILS.map(email => mailboxData.find(m => m.email === email)).filter(m => m !== undefined);
     if (mailboxes.length === 0) return { mailboxCount: 0, mailboxesWithEmails: 0, found: 0, opened: 0, clicked: 0, duration: 0 };
 
     const limit = createConcurrencyLimiter(WORKER_CONCURRENCY);
     let logIndex = 0;
 
-    const results = await Promise.all(
+    const processPromise = Promise.all(
       mailboxes.map((mailbox) => {
         logIndex++;
         const currentIndex = logIndex;
@@ -536,11 +652,7 @@ const engageSeedlistMailchimp = async () => {
               processMailbox(mailbox, currentIndex, mailboxes),
               new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout (${MAILBOX_TIMEOUT_MS / 1000}s)`)), MAILBOX_TIMEOUT_MS))
             ]);
-            if (result.found > 0) {
-              console.log(`    Done - Found: ${result.found} | Opened: ${result.opened} | Clicked: ${result.clicked}`);
-            } else {
-              console.log(`    No emails from target senders`);
-            }
+            console.log(result.found > 0 ? `    Done - Found: ${result.found} | Opened: ${result.opened} | Clicked: ${result.clicked}` : `    No emails`);
             return result;
           } catch (error) {
             console.log(`    ERROR: ${error.message}`);
@@ -550,11 +662,24 @@ const engageSeedlistMailchimp = async () => {
       })
     );
 
+    const globalTimeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('GLOBAL TIMEOUT: Script exceeded 2.5 minutes')), 150000)
+    );
+
+    let results;
+    try {
+      results = await Promise.race([processPromise, globalTimeout]);
+    } catch (timeoutError) {
+      console.error(`\n⏱️  ${timeoutError.message} - Forcing completion`);
+      results = [];
+    }
+
     const totalFound = results.reduce((s, r) => s + r.found, 0);
     const totalOpened = results.reduce((s, r) => s + r.opened, 0);
     const totalClicked = results.reduce((s, r) => s + r.clicked, 0);
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`\n[MAILCHIMP SEEDLIST] Found: ${totalFound} | Opened: ${totalOpened} | Clicked: ${totalClicked} | ${duration}s\n`);
+
+    console.log(`\n[SES] Found: ${totalFound} | Opened: ${totalOpened} | Clicked: ${totalClicked} | ${duration}s\n`);
     if (globalBrowser) { try { await globalBrowser.close(); globalBrowser = null; } catch (e) { } }
     return { mailboxCount: mailboxes.length, mailboxesWithEmails: results.filter(r => r.found > 0).length, found: totalFound, opened: totalOpened, clicked: totalClicked, duration: parseFloat(duration) };
   } catch (error) {
@@ -564,8 +689,8 @@ const engageSeedlistMailchimp = async () => {
   }
 };
 
-module.exports = { engageSeedlistMailchimp };
+module.exports = { engageTestSes };
 
 if (require.main === module) {
-  engageSeedlistMailchimp().then(() => process.exit(0)).catch((error) => { console.error(error); process.exit(1); });
+  engageTestSes().then(() => process.exit(0)).catch((error) => { console.error(error); process.exit(1); });
 }

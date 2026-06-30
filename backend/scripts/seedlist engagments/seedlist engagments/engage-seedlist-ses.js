@@ -1,15 +1,91 @@
+// Prevent stray Puppeteer ProtocolErrors from crashing the process mid-run
+process.on('unhandledRejection', (reason) => {
+  console.error('  [unhandledRejection suppressed]', reason?.message || reason);
+});
+
 const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
 const Imap = require('imap');
 const { simpleParser } = require('mailparser');
 const crypto = require('crypto');
 const puppeteer = require('puppeteer');
+const http = require('http');
+const https = require('https');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '..', '..', '.env') });
 
-// TODO: Set your Mailchimp sender address(es) before enabling MAILCHIMP_SEEDLIST_WARMER
 const TARGET_SENDERS = [
-  // 'your-mailchimp-sender@example.com',
+  'admin@email.disquantified.org',
+  'admin@email.theboringmagazine.com',
+  'admin@email.whatutalkingboutwillis.com',
+  'allaboard@email.jerseyexpress.net',
+  'ask@email.avstarnews.com',
+  'bianca@email.conversationswithbianca.com',
+  'contact@email.aliensync.com',
+  'contact@email.alternativeway.net',
+  'contact@email.americanlivewire.com',
+  'contact@email.decoratoradvice.com',
+  'contact@email.designmode24.com',
+  'contact@email.famousparenting.com',
+  'contact@email.fintechasia.net',
+  'contact@email.formotorbikes.com',
+  'contact@email.freelogopng.com',
+  'contact@email.gfxmaker.com',
+  'contact@email.healthsciencesforum.com',
+  'contact@email.home-hearted.com',
+  'contact@email.letwomenspeak.com',
+  'contact@email.myfavouriteplaces.org',
+  'contact@email.mygreenbucks.net',
+  'contact@email.myinteriorpalace.com',
+  'contact@email.ramechanic.com',
+  'contact@email.rapidhomedirect.com',
+  'contact@email.springhillmedgroup.com',
+  'contact@email.thinkofgames.com',
+  'contact@email.thunderonthegulf.com',
+  'contact@email.tomoson.com',
+  'contact@email.wealthybyte.com',
+  'editor@email.thegamearchives.com',
+  'enquiries@email.activepropertycare.com',
+  'enquiries@email.feedbuzzard.com',
+  'feature@email.g15tools.com',
+  'feed@email.pro-reed.com',
+  'hi@email.igxcosmetics.com',
+  'hitmeup@email.onthisveryspot.com',
+  'ihave@email.nothing2hide.net',
+  'info@email.arcyart.com',
+  'info@email.articoolo.com',
+  'info@email.betterthisworld.com',
+  'info@email.cookiesforlove.com',
+  'info@email.craigscottcapital.com',
+  'info@email.drhomey.com',
+  'info@email.embedtree.com',
+  'info@email.entretech.org',
+  'info@email.etherions.com',
+  'info@email.fintechasia.net',
+  'info@email.fitness-talk.net',
+  'info@email.harmonicode.com',
+  'info@email.hearthstats.net',
+  'info@email.housereal.net',
+  'info@email.internet-story.com',
+  'info@email.kdarchitects.net',
+  'info@email.lapwinglabs.com',
+  'info@email.mygardenandpatio.com',
+  'info@email.notinthekitchenanymore.com',
+  'info@email.playmyworld.com',
+  'info@email.thehometrotters.com',
+  'info@email.thestripesblog.com',
+  'info@email.vital-mag.net',
+  'info@email.wavetechglobal.com',
+  'inquire@email.simcookie.com',
+  'loaded@email.lock-7.com',
+  'manager@email.high-tech-inspections.com',
+  'manager@email.wizzydigital.org',
+  'movein@email.middleclasshomes.net',
+  'share@email.lovelolablog.com',
+  'showmelove@email.theportablegamer.com',
+  'support@email.silicon-insider.com',
+  'support@email.usefulideas.net',
+  'team@email.riproar.com',
 ];
 
 const MAX_EMAIL_AGE_HOURS = 240;
@@ -24,7 +100,7 @@ const ENGAGEMENT_CONFIG = {
   click_delay_max: 4000
 };
 
-const shouldCheckReadEmails = (email) => email.toLowerCase().includes('use');
+const shouldCheckReadEmails = () => true;
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -157,6 +233,35 @@ const loadUrl = async (url, type = 'unknown', retries = 2) => {
   return false;
 };
 
+// SES tracking pixels (awstrack.me) don't reliably fire via Puppeteer's
+// networkidle2 wait — a plain HTTP GET registers the open just as well
+// and is much cheaper, so it's used as a fallback when no real page-load is needed.
+const fireTrackingUrl = async (url, retries = 2) => {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await new Promise((resolve, reject) => {
+        const lib = url.startsWith('https://') ? https : http;
+        const req = lib.get(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'close'
+          },
+          timeout: 8000
+        }, (res) => { res.resume(); resolve(true); });
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')); });
+      });
+      return true;
+    } catch (err) {
+      if (attempt < retries) await new Promise(r => setTimeout(r, 500));
+      else console.log(`          ⚠️  fallback-open failed: ${err.message} (gave up after ${retries} attempts)`);
+    }
+  }
+  return false;
+};
+
 const simulateReadTime = async () => {
   const delay = Math.random() * (ENGAGEMENT_CONFIG.read_time_max - ENGAGEMENT_CONFIG.read_time_min) + ENGAGEMENT_CONFIG.read_time_min;
   await new Promise(resolve => setTimeout(resolve, delay));
@@ -193,7 +298,7 @@ const getOrCreateCampaign = async (campaignKey, senderEmail, subject, date, allM
 
   const { data: campaign, error: insertError } = await supabase
     .from('warmup_campaigns')
-    .insert({ campaign_key: campaignKey, provider: 'mailchimp', sender_email: senderEmail,
+    .insert({ campaign_key: campaignKey, provider: 'ses', sender_email: senderEmail,
               subject, campaign_date: date, total_mailboxes: total,
               target_open_rate: openRate, target_click_rate: clickRate,
               target_opens: targetOpens, target_clicks: targetClicks })
@@ -264,22 +369,41 @@ const markEmailAsRead = async (mailbox, uid) => {
 
 const moveToMaxifyLabel = async (mailbox, uid) => {
   if (!uid) return;
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const appPassword = decrypt(mailbox.app_password).replace(/\s/g, '');
     const imap = new Imap({ user: mailbox.email, password: appPassword, host: mailbox.imap_host, port: mailbox.imap_port, tls: true, tlsOptions: { rejectUnauthorized: false }, connTimeout: IMAP_CONFIG.connTimeout, authTimeout: IMAP_CONFIG.authTimeout });
-    imap.once('ready', () => { imap.openBox('INBOX', false, (err) => { if (err) { imap.end(); return reject(err); } imap.addFlags(uid, ['\\Deleted'], (flagErr) => { if (flagErr) { imap.end(); return reject(flagErr); } imap.expunge((expErr) => { imap.end(); if (expErr) return reject(expErr); resolve(); }); }); }); });
-    imap.once('error', (err) => reject(err));
+    imap.once('ready', () => {
+      imap.openBox('INBOX', false, (err) => {
+        if (err) { imap.end(); return resolve(); }
+        // Archive: move out of inbox without deleting.
+        // Try Gmail All Mail first, fall back to Archive folder.
+        const folders = ['[Gmail]/All Mail', 'Archive'];
+        const tryMove = (index) => {
+          if (index >= folders.length) { imap.end(); return resolve(); }
+          imap.move(uid, folders[index], (moveErr) => {
+            if (moveErr) return tryMove(index + 1);
+            imap.end();
+            resolve();
+          });
+        };
+        tryMove(0);
+      });
+    });
+    imap.once('error', () => resolve());
     imap.connect();
   });
 };
 
 const buildSearchCriteria = (checkReadEmails, sinceDate) => {
-  let senderCriteria;
-  if (TARGET_SENDERS.length === 1) { senderCriteria = ['FROM', TARGET_SENDERS[0]]; }
-  else if (TARGET_SENDERS.length === 2) { senderCriteria = ['OR', ['FROM', TARGET_SENDERS[0]], ['FROM', TARGET_SENDERS[1]]]; }
-  else { let orChain = ['FROM', TARGET_SENDERS[TARGET_SENDERS.length - 1]]; for (let i = TARGET_SENDERS.length - 2; i >= 0; i--) { orChain = ['OR', ['FROM', TARGET_SENDERS[i]], orChain]; } senderCriteria = orChain; }
-  if (checkReadEmails) return [senderCriteria, ['SINCE', sinceDate]];
-  return ['UNSEEN', senderCriteria, ['SINCE', sinceDate]];
+  if (checkReadEmails) return [['SINCE', sinceDate]];
+  return ['UNSEEN', ['SINCE', sinceDate]];
+};
+
+const TARGET_SENDER_SET = new Set(TARGET_SENDERS.map((s) => s.toLowerCase()));
+const isFromTargetSender = (email) => {
+  const addr = (email.from?.value?.[0]?.address || '').toLowerCase();
+  const text = (email.from?.text || '').toLowerCase();
+  return TARGET_SENDER_SET.has(addr) || TARGET_SENDERS.some((s) => text.includes(s));
 };
 
 const checkSpamAndMove = async (mailbox, checkReadEmails = false) => {
@@ -339,8 +463,8 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
     const emails = await new Promise((resolve, reject) => {
       imap.openBox('INBOX', false, (err) => {
         if (err) { imap.end(); return reject(err); }
-        const twoDaysAgo = new Date(); twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
-        imap.search(buildSearchCriteria(checkReadEmails, twoDaysAgo), (err, results) => {
+        const tenDaysAgo = new Date(); tenDaysAgo.setDate(tenDaysAgo.getDate() - 10);
+        imap.search(buildSearchCriteria(checkReadEmails, tenDaysAgo), (err, results) => {
           if (err) { imap.end(); return reject(err); }
           if (!results || results.length === 0) { imap.end(); return resolve([]); }
           const fetch = imap.fetch(results.reverse(), { bodies: '', struct: true, markSeen: false, envelope: true });
@@ -350,8 +474,11 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
               let buffer = '', uid = null, bodyEnded = false, attrsReceived = false;
               msg.once('attributes', (attrs) => { uid = attrs.uid; attrsReceived = true; if (bodyEnded) resolveWithParsedEmail(); });
               const resolveWithParsedEmail = async () => {
-                try { const parsed = await simpleParser(buffer); if (!uid) uid = seqno; resolveEmail({ seqno, uid, from: parsed.from, subject: parsed.subject || 'No subject', text: parsed.text || '', html: parsed.html || '', date: parsed.date }); }
-                catch (e) { resolveEmail(null); }
+                try {
+                  const parsed = await simpleParser(buffer);
+                  if (!uid) uid = seqno;
+                  resolveEmail({ seqno, uid, from: parsed.from, subject: parsed.subject || 'No subject', text: parsed.text || '', html: parsed.html || '', messageId: parsed.messageId || null, date: parsed.date });
+                } catch (e) { resolveEmail(null); }
               };
               msg.on('body', (stream) => { stream.on('data', (chunk) => { buffer += chunk.toString('utf8'); }); stream.once('end', () => { bodyEnded = true; if (attrsReceived) resolveWithParsedEmail(); }); });
               msg.once('end', () => { if (!attrsReceived && bodyEnded) setTimeout(resolveWithParsedEmail, 100); });
@@ -365,9 +492,21 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
     });
 
     if (emails.length === 0) return { mailbox: mailbox.email, found: 0, opened: 0, clicked: 0 };
+
+    const targetEmails = emails.filter(isFromTargetSender);
+    const nonTargetCount = emails.length - targetEmails.length;
+    if (nonTargetCount > 0) console.log(`   📭 ${nonTargetCount} non-target email(s) skipped`);
+    if (targetEmails.length > 0) {
+      console.log(`   📬 ${targetEmails.length} target-sender email(s) found:`);
+      for (const e of targetEmails) {
+        const addr = e.from?.value?.[0]?.address || e.from?.text || 'unknown';
+        console.log(`      → ${addr} | ${e.subject}`);
+      }
+    }
+
     let openedCount = 0, clickedCount = 0;
 
-    for (const email of emails) {
+    for (const email of targetEmails) {
       try {
         const senderEmail = email.from?.value?.[0]?.address || email.from?.text;
 
@@ -411,7 +550,7 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
           await markEmailAsRead(mailbox, email.uid);
           try {
             await moveToMaxifyLabel(mailbox, email.uid);
-            console.log(`          📁 Moved to "Maxify's Label" (not engaged)`);
+            console.log(`          📁 Archived (not engaged)`);
           } catch (labelError) {
             console.log(`          ⚠️  Archive failed: ${labelError.message}`);
           }
@@ -424,16 +563,12 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
 
         const allUrls = extractAllUrls(email.text, email.html);
 
-        // ── MAILCHIMP-ONLY tracking pixel detection ───────────────────
-        const trackingPixels = allUrls.filter(url => {
+        // ── SES-ONLY tracking pixel detection ────────────────────────
+        const trackingPixels = allUrls.filter((url) => {
           const lowerUrl = url.toLowerCase();
-          const isMailchimpTracker =
-            (lowerUrl.includes('list-manage.com') && lowerUrl.includes('track/open')) ||
-            (lowerUrl.includes('mailchimp.com') && (lowerUrl.includes('track') || lowerUrl.endsWith('.gif') || lowerUrl.endsWith('.png')));
-          const isNotClickTracker =
-            !(lowerUrl.includes('list-manage.com') && lowerUrl.includes('track/click')) &&
-            !lowerUrl.includes('mailchi.mp');
-          return isMailchimpTracker && isNotClickTracker;
+          const isSesTracker = lowerUrl.includes('awstrack.me') && lowerUrl.includes('/trk/open');
+          const isNotClickTracker = !(lowerUrl.includes('awstrack.me') && lowerUrl.includes('/trk/click'));
+          return isSesTracker && isNotClickTracker;
         });
 
         if (!decisionRow.open_done) {
@@ -445,15 +580,31 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
             console.log(`          ⚠️  DB error marking open_done — skipping pixel load: ${e.message}`);
           }
           if (openWriteOk) {
+            let openFired = false;
+            let openUrl = null;
             if (trackingPixels.length > 0) {
-              for (const pixel of trackingPixels) { await loadUrl(pixel, 'pixel'); await new Promise(resolve => setTimeout(resolve, 800)); }
+              for (const pixel of trackingPixels) {
+                const fired = await loadUrl(pixel, 'pixel');
+                if (fired) { openFired = true; openUrl = pixel; }
+                await new Promise(resolve => setTimeout(resolve, 800));
+              }
               await new Promise(resolve => setTimeout(resolve, 3000));
             } else {
               const fallback = allUrls.find(url => url.startsWith('http') && !url.toLowerCase().includes('unsubscribe'));
-              if (fallback) { await loadUrl(fallback, 'fallback-open'); await new Promise(resolve => setTimeout(resolve, 3000)); }
+              if (fallback) {
+                openFired = await fireTrackingUrl(fallback);
+                if (openFired) openUrl = fallback;
+                await new Promise(resolve => setTimeout(resolve, 3000));
+              }
             }
-            await incrementCampaignOpens(campaign.id).catch(e =>
-              console.log(`          ⚠️  inc actual_opens failed: ${e.message}`));
+            if (openFired) {
+              const openDomain = (() => { try { return new URL(openUrl).hostname; } catch { return openUrl; } })();
+              console.log(`          ✓ OPENED — ${email.subject} [pixel: ${openDomain}]`);
+              await incrementCampaignOpens(campaign.id).catch(e =>
+                console.log(`          ⚠️  inc actual_opens failed: ${e.message}`));
+            } else {
+              console.log(`          ✗ OPEN FAILED — ${email.subject}`);
+            }
           }
         }
 
@@ -469,12 +620,15 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
             console.log(`          ⚠️  DB error marking click_done — skipping click: ${e.message}`);
           }
           if (clickWriteOk) {
-            const clickableLinks = allUrls.filter(url => url.startsWith('http') && !url.toLowerCase().includes('unsubscribe') && !trackingPixels.includes(url));
-            const mailchimpClickLinks = clickableLinks.filter(url => {
+            const clickableLinks = allUrls.filter((url) =>
+              url.startsWith('http') &&
+              !url.toLowerCase().includes('unsubscribe') &&
+              !trackingPixels.includes(url));
+            const sesClickLinks = clickableLinks.filter((url) => {
               const lowerUrl = url.toLowerCase();
-              return lowerUrl.includes('mailchi.mp') || (lowerUrl.includes('list-manage.com') && lowerUrl.includes('track/click'));
+              return lowerUrl.includes('awstrack.me') && lowerUrl.includes('/trk/click');
             });
-            const linksToClickFrom = mailchimpClickLinks.length > 0 ? mailchimpClickLinks : clickableLinks;
+            const linksToClickFrom = sesClickLinks.length > 0 ? sesClickLinks : clickableLinks;
             if (linksToClickFrom.length > 0) {
               const randomLink = linksToClickFrom[Math.floor(Math.random() * linksToClickFrom.length)];
               await new Promise(resolve => setTimeout(resolve, Math.random() * (ENGAGEMENT_CONFIG.click_delay_max - ENGAGEMENT_CONFIG.click_delay_min) + ENGAGEMENT_CONFIG.click_delay_min));
@@ -504,16 +658,16 @@ const processMailbox = async (mailbox, mailboxIndex = 999, allMailboxes = []) =>
       }
     }
 
-    return { mailbox: mailbox.email, found: emails.length, opened: openedCount, clicked: clickedCount };
+    return { mailbox: mailbox.email, found: targetEmails.length, opened: openedCount, clicked: clickedCount };
   } catch (error) {
     return { mailbox: mailbox.email, found: 0, opened: 0, clicked: 0, error: error.message };
   }
 };
 
-const engageSeedlistMailchimp = async () => {
+const engageSeedlistSes = async () => {
   const startTime = Date.now();
   console.log('\n========================================');
-  console.log('   [MAILCHIMP] SEEDLIST ENGAGEMENT');
+  console.log('   [SES] SEEDLIST ENGAGEMENT');
   console.log('========================================\n');
 
   try {
@@ -554,7 +708,7 @@ const engageSeedlistMailchimp = async () => {
     const totalOpened = results.reduce((s, r) => s + r.opened, 0);
     const totalClicked = results.reduce((s, r) => s + r.clicked, 0);
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`\n[MAILCHIMP SEEDLIST] Found: ${totalFound} | Opened: ${totalOpened} | Clicked: ${totalClicked} | ${duration}s\n`);
+    console.log(`\n[SES SEEDLIST] Found: ${totalFound} | Opened: ${totalOpened} | Clicked: ${totalClicked} | ${duration}s\n`);
     if (globalBrowser) { try { await globalBrowser.close(); globalBrowser = null; } catch (e) { } }
     return { mailboxCount: mailboxes.length, mailboxesWithEmails: results.filter(r => r.found > 0).length, found: totalFound, opened: totalOpened, clicked: totalClicked, duration: parseFloat(duration) };
   } catch (error) {
@@ -564,8 +718,8 @@ const engageSeedlistMailchimp = async () => {
   }
 };
 
-module.exports = { engageSeedlistMailchimp };
+module.exports = { engageSeedlistSes };
 
 if (require.main === module) {
-  engageSeedlistMailchimp().then(() => process.exit(0)).catch((error) => { console.error(error); process.exit(1); });
+  engageSeedlistSes().then(() => process.exit(0)).catch((error) => { console.error(error); process.exit(1); });
 }

@@ -18,6 +18,8 @@ const { engageSeedlistMailerLite } = require('../scripts/seedlist engagments/see
 
 const { engageTestDrip } = require('../scripts/seedlist engagments/test engagments/engage-test-drip');
 const { engageSeedlistDrip } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-drip');
+const { engageTestSes } = require('../scripts/seedlist engagments/test engagments/engage-test-ses');
+const { engageSeedlistSes } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-ses');
 
 const STUCK_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -66,5 +68,7 @@ registerWarmerJob({ label: 'MailerLite Seedlist', schedule: '*/1 * * * *', envFl
 
 registerWarmerJob({ label: 'Drip Test', schedule: '*/3 * * * *', envFlag: 'DRIP_TEST_WARMER', run: engageTestDrip });
 registerWarmerJob({ label: 'Drip Seedlist', schedule: '*/1 * * * *', envFlag: 'DRIP_SEEDLIST_WARMER', run: engageSeedlistDrip });
+registerWarmerJob({ label: 'SES Test', schedule: '*/1 * * * *', envFlag: 'SES_TEST_WARMER', run: engageTestSes });
+registerWarmerJob({ label: 'SES Seedlist', schedule: '*/1 * * * *', envFlag: 'SES_SEEDLIST_WARMER', run: engageSeedlistSes });
 
 console.log('Seedlist warmer cron jobs registered.');
