@@ -3,6 +3,7 @@ const rollbar = require('../middlewares/trackers/rollbar');
 
 const { engageTestBrevo } = require('../scripts/seedlist engagments/test engagments/engage-test-brevo');
 const { engageSeedlistBrevo } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-brevo');
+const { engageSeedlistEmails: engageSeedlistBrevoV2 } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-brevo-v2');
 
 const { engageTestHubspot } = require('../scripts/seedlist engagments/test engagments/engage-test-hubspot');
 const { engageSeedlistHubspot } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-hubspot');
@@ -51,6 +52,7 @@ function registerWarmerJob({ label, schedule, envFlag, run }) {
 
 registerWarmerJob({ label: 'Brevo Test', schedule: '*/1 * * * *', envFlag: 'BREVO_TEST_WARMER', run: engageTestBrevo });
 registerWarmerJob({ label: 'Brevo Seedlist', schedule: '*/1 * * * *', envFlag: 'BREVO_SEEDLIST_WARMER', run: engageSeedlistBrevo });
+registerWarmerJob({ label: 'Brevo Seedlist V2', schedule: '*/1 * * * *', envFlag: 'BREVO_V2_SEEDLIST_WARMER', run: engageSeedlistBrevoV2 });
 
 registerWarmerJob({ label: 'HubSpot Test', schedule: '*/1 * * * *', envFlag: 'HUBSPOT_TEST_WARMER', run: engageTestHubspot });
 registerWarmerJob({ label: 'HubSpot Seedlist', schedule: '*/1 * * * *', envFlag: 'HUBSPOT_SEEDLIST_WARMER', run: engageSeedlistHubspot });
