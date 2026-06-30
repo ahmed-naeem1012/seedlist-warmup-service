@@ -16,6 +16,9 @@ const { engageSeedlistActiveCampaign } = require('../scripts/seedlist engagments
 const { engageTestMailerLite } = require('../scripts/seedlist engagments/test engagments/engage-test-mailerlite');
 const { engageSeedlistMailerLite } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-mailerlite');
 
+const { engageTestSes } = require('../scripts/seedlist engagments/test engagments/engage-test-ses');
+const { engageSeedlistSes } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-ses');
+
 const STUCK_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 
 // Env-flag gate + re-entrancy lock (with stuck-job force release) + try/catch/finally,
@@ -60,5 +63,8 @@ registerWarmerJob({ label: 'ActiveCampaign Seedlist', schedule: '*/1 * * * *', e
 
 registerWarmerJob({ label: 'MailerLite Test', schedule: '1-59/3 * * * *', envFlag: 'MAILERLITE_TEST_WARMER', run: engageTestMailerLite });
 registerWarmerJob({ label: 'MailerLite Seedlist', schedule: '*/1 * * * *', envFlag: 'MAILERLITE_SEEDLIST_WARMER', run: engageSeedlistMailerLite });
+
+registerWarmerJob({ label: 'SES Test', schedule: '*/1 * * * *', envFlag: 'SES_TEST_WARMER', run: engageTestSes });
+registerWarmerJob({ label: 'SES Seedlist', schedule: '*/1 * * * *', envFlag: 'SES_SEEDLIST_WARMER', run: engageSeedlistSes });
 
 console.log('Seedlist warmer cron jobs registered.');
