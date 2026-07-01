@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SES Test Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f1f5f9;
+      color: #1e293b;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #1e293b;
+      color: #fff;
+      padding: 20px 40px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    header .badge {
+      background: #4F46E5;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      padding: 3px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+    header h1 { font-size: 18px; font-weight: 600; }
+    header p  { font-size: 13px; color: #94a3b8; margin-top: 2px; }
+
+    main {
+      max-width: 780px;
+      margin: 36px auto;
+      padding: 0 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 28px 32px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+    }
+    .card-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #64748b;
+      margin-bottom: 20px;
+    }
+
+    /* Stats row */
+    .stats {
+      display: flex;
+      gap: 16px;
+    }
+    .stat-box {
+      flex: 1;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 18px 20px;
+      text-align: center;
+    }
+    .stat-box .num {
+      font-size: 36px;
+      font-weight: 800;
+      color: #4F46E5;
+      line-height: 1;
+    }
+    .stat-box .lbl {
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 6px;
+    }
+
+    /* Email list toggle */
+    .toggle-btn {
+      margin-top: 18px;
+      background: none;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 7px 14px;
+      font-size: 12px;
+      color: #475569;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .toggle-btn:hover { background: #f1f5f9; }
+
+    .email-list {
+      margin-top: 12px;
+      max-height: 220px;
+      overflow-y: auto;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+    }
+    .email-item {
+      font-size: 13px;
+      padding: 8px 14px;
+      color: #475569;
+      border-bottom: 1px solid #f1f5f9;
+    }
+    .email-item:last-child { border-bottom: none; }
+
+    /* Form */
+    .form-group { margin-bottom: 18px; }
+    .form-group label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: #374151;
+      margin-bottom: 6px;
+    }
+    .form-group input {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      font-size: 14px;
+      color: #1e293b;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .form-group input:focus {
+      border-color: #4F46E5;
+      box-shadow: 0 0 0 3px rgba(79,70,229,0.12);
+    }
+    .hint {
+      font-size: 12px;
+      color: #94a3b8;
+      margin-top: 5px;
+    }
+
+    /* Send button */
+    .send-btn {
+      width: 100%;
+      padding: 13px;
+      background: #4F46E5;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .send-btn:hover:not(:disabled) { background: #4338ca; }
+    .send-btn:disabled { background: #a5b4fc; cursor: not-allowed; }
+
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255,255,255,0.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Result panel */
+    #result { display: none; margin-top: 20px; border-radius: 10px; padding: 20px 24px; }
+    #result.success { background: #f0fdf4; border: 1px solid #86efac; }
+    #result.error   { background: #fef2f2; border: 1px solid #fca5a5; }
+
+    #result .result-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 14px;
+    }
+    #result.success .result-title { color: #15803d; }
+    #result.error   .result-title { color: #b91c1c; }
+
+    .result-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .result-cell {
+      background: #fff;
+      border-radius: 8px;
+      padding: 12px;
+      text-align: center;
+    }
+    .result-cell .rnum { font-size: 26px; font-weight: 800; line-height: 1; }
+    .result-cell .rlbl { font-size: 11px; color: #64748b; margin-top: 4px; }
+    .rnum.green { color: #16a34a; }
+    .rnum.red   { color: #dc2626; }
+    .rnum.blue  { color: #4F46E5; }
+
+    .error-list {
+      margin-top: 10px;
+      max-height: 140px;
+      overflow-y: auto;
+    }
+    .error-entry {
+      font-size: 12px;
+      color: #b91c1c;
+      padding: 4px 0;
+      border-bottom: 1px solid #fee2e2;
+    }
+    .error-entry:last-child { border-bottom: none; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span class="badge">SES</span>
+      <h1>Test Campaign Dashboard</h1>
+    </div>
+    <p>Send a campaign via AWS SES to all test auto-responder mailboxes</p>
+  </div>
+</header>
+
+<main>
+
+  <!-- Mailbox summary card -->
+  <div class="card">
+    <div class="card-label">Test Mailboxes</div>
+    <div class="stats">
+      <div class="stat-box">
+        <div class="num" id="emailCount">—</div>
+        <div class="lbl">Total Recipients</div>
+      </div>
+    </div>
+    <button class="toggle-btn" id="toggleBtn" onclick="toggleList()">Show email list</button>
+    <div class="email-list" id="emailList" style="display:none;"></div>
+  </div>
+
+  <!-- Send campaign card -->
+  <div class="card">
+    <div class="card-label">Send Test Campaign</div>
+
+    <div class="form-group">
+      <label for="subject">Email Subject</label>
+      <input type="text" id="subject" placeholder="Enter subject line..." />
+      <div class="hint">This will be the subject of the SES email sent to all test mailboxes.</div>
+    </div>
+
+    <button class="send-btn" id="sendBtn" onclick="sendCampaign()">
+      <span class="spinner" id="spinner"></span>
+      <span id="btnText">Send Campaign to All Test Mailboxes</span>
+    </button>
+
+    <div id="result"></div>
+  </div>
+
+</main>
+
+<script>
+  // Pre-fill subject with current timestamp
+  document.getElementById('subject').value =
+    'SES Test Campaign — ' + new Date().toLocaleString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric',
+      hour: '2-digit', minute: '2-digit'
+    });
+
+  // Load test emails from API
+  fetch('/api/ses/test-emails')
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('emailCount').textContent = data.count;
+      const list = document.getElementById('emailList');
+      list.innerHTML = data.emails
+        .map(e => `<div class="email-item">${e}</div>`)
+        .join('');
+    })
+    .catch(() => {
+      document.getElementById('emailCount').textContent = '?';
+    });
+
+  function toggleList() {
+    const list = document.getElementById('emailList');
+    const btn  = document.getElementById('toggleBtn');
+    const hidden = list.style.display === 'none';
+    list.style.display = hidden ? 'block' : 'none';
+    btn.textContent = hidden ? 'Hide email list' : 'Show email list';
+  }
+
+  async function sendCampaign() {
+    const subject = document.getElementById('subject').value.trim();
+    if (!subject) {
+      alert('Please enter a subject line before sending.');
+      return;
+    }
+
+    // Loading state
+    const btn     = document.getElementById('sendBtn');
+    const spinner = document.getElementById('spinner');
+    const btnText = document.getElementById('btnText');
+    btn.disabled          = true;
+    spinner.style.display = 'block';
+    btnText.textContent   = 'Sending…';
+
+    const resultEl = document.getElementById('result');
+    resultEl.style.display = 'none';
+    resultEl.className = 'result';
+
+    try {
+      const res  = await fetch('/api/ses/send-test-campaign', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ subject }),
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        resultEl.className = 'result success';
+        resultEl.innerHTML = `
+          <div class="result-title">Campaign sent successfully</div>
+          <div class="result-grid">
+            <div class="result-cell">
+              <div class="rnum green">${data.sent}</div>
+              <div class="rlbl">Sent</div>
+            </div>
+            <div class="result-cell">
+              <div class="rnum red">${data.failed}</div>
+              <div class="rlbl">Failed</div>
+            </div>
+            <div class="result-cell">
+              <div class="rnum blue">${data.duration}s</div>
+              <div class="rlbl">Duration</div>
+            </div>
+          </div>
+          ${data.errors && data.errors.length > 0
+            ? `<div class="error-list">${data.errors.map(e =>
+                `<div class="error-entry">✗ ${e.email} — ${e.error}</div>`
+              ).join('')}</div>`
+            : ''}
+        `;
+      } else {
+        resultEl.className = 'result error';
+        resultEl.innerHTML = `
+          <div class="result-title">Failed to send campaign</div>
+          <div style="font-size:13px;color:#b91c1c;">${data.error}</div>
+        `;
+      }
+    } catch (err) {
+      resultEl.className = 'result error';
+      resultEl.innerHTML = `
+        <div class="result-title">Request failed</div>
+        <div style="font-size:13px;color:#b91c1c;">${err.message}</div>
+      `;
+    }
+
+    resultEl.style.display = 'block';
+    btn.disabled          = false;
+    spinner.style.display = 'none';
+    btnText.textContent   = 'Send Campaign to All Test Mailboxes';
+  }
+</script>
+
+</body>
+</html>
