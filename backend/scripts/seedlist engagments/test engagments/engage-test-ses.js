@@ -110,9 +110,8 @@ const TEST_EMAILS = [
   'becca@putmyuselysync.com'
 ];
 
-// TODO: Set your SES sender address(es) before enabling SES_TEST_WARMER
 const TARGET_SENDERS = [
-  'abdullahamir1010@gmail.com'
+  'abdullah@maxify.co'
 ];
 
 const MAX_EMAIL_AGE_HOURS = 1;
