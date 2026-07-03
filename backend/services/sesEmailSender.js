@@ -2,6 +2,10 @@ const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
+const supabase = require('./supabaseClient');
+const { decrypt } = require('../utils/crypto');
+const { renderTemplate } = require('../utils/templateRenderer');
+
 // The same 100 test auto-responder mailboxes that engage-test-ses.js monitors.
 // These receive the SES campaign so the engagement cron has emails to open/click.
 const TEST_EMAILS = [
@@ -224,4 +228,115 @@ const sendSesTestCampaign = async ({ subject, fromEmail, recipients, clickUrl } 
   return { sent, failed, total: to.length, errors, duration };
 };
 
-module.exports = { sendSesTestCampaign, TEST_EMAILS };
+// Supabase/PostgREST caps unpaginated selects at 1000 rows (db-max-rows) — page
+// through with .range() so campaigns actually reach every active mailbox, not
+// just the first 1000.
+const MAILBOX_PAGE_SIZE = 1000;
+const fetchAllActiveMailboxEmails = async () => {
+  const emails = [];
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from('auto_responder_mailboxes')
+      .select('email')
+      .eq('is_active', true)
+      .range(offset, offset + MAILBOX_PAGE_SIZE - 1);
+
+    if (error) throw new Error(`Failed to load recipients: ${error.message}`);
+
+    emails.push(...data.map(m => m.email));
+    if (data.length < MAILBOX_PAGE_SIZE) break;
+    offset += MAILBOX_PAGE_SIZE;
+  }
+
+  return emails;
+};
+
+// Sends a tenant's own campaign using their own SES keys (from ses_integrations)
+// to the full active auto_responder_mailboxes seedlist. Content comes either from
+// a saved maxify-proj template (templateId, rendered via utils/templateRenderer.js —
+// same `templates` table + block schema the dashboard's own editor/preview uses) or
+// from an explicit subject/html/text passed straight through.
+const sendSesCampaignForOrg = async ({ orgId, fromEmail, templateId, templateData, subject, html, text } = {}) => {
+  const startTime = Date.now();
+
+  if (!orgId) throw new Error('orgId is required.');
+  if (!fromEmail) throw new Error('fromEmail is required.');
+  if (!templateId && !subject) throw new Error('subject is required when not using templateId.');
+  if (!templateId && !html && !text) throw new Error('At least one of templateId, html or text is required.');
+
+  if (templateId) {
+    const { data: template, error: templateError } = await supabase
+      .from('templates')
+      .select('*')
+      .eq('id', templateId)
+      .eq('workspace_id', orgId)
+      .single();
+
+    if (templateError) throw new Error(`Failed to load template: ${templateError.message}`);
+    if (!template) throw new Error(`No template ${templateId} found for org ${orgId}.`);
+
+    subject = template.subject || subject;
+    html = renderTemplate(template, templateData || {});
+  }
+
+  const { data: integration, error: integrationError } = await supabase
+    .from('ses_integrations')
+    .select('*')
+    .eq('org_id', orgId)
+    .eq('from_email', fromEmail)
+    .eq('is_active', true)
+    .maybeSingle();
+
+  if (integrationError) throw new Error(`Failed to look up integration: ${integrationError.message}`);
+  if (!integration) throw new Error(`No active SES integration found for org ${orgId} / ${fromEmail}.`);
+
+  const client = new SESClient({
+    region: integration.aws_region,
+    credentials: {
+      accessKeyId: decrypt(integration.aws_access_key_id_enc),
+      secretAccessKey: decrypt(integration.aws_secret_access_key_enc),
+    },
+  });
+
+  const to = await fetchAllActiveMailboxEmails();
+
+  const body = {};
+  if (html) body.Html = { Data: html, Charset: 'UTF-8' };
+  if (text) body.Text = { Data: text, Charset: 'UTF-8' };
+
+  let sent = 0;
+  let failed = 0;
+  const errors = [];
+
+  const limit = createConcurrencyLimiter(SEND_CONCURRENCY);
+
+  await Promise.all(
+    to.map(email =>
+      limit(async () => {
+        try {
+          await client.send(new SendEmailCommand({
+            Source: fromEmail,
+            Destination: { ToAddresses: [email] },
+            Message: {
+              Subject: { Data: subject, Charset: 'UTF-8' },
+              Body: body,
+            },
+          }));
+          sent++;
+          console.log(`  [SES:${orgId}] Sent → ${email}`);
+        } catch (err) {
+          failed++;
+          errors.push({ email, error: err.message });
+          console.error(`  [SES:${orgId}] Failed → ${email}: ${err.message}`);
+        }
+      })
+    )
+  );
+
+  const duration = parseFloat(((Date.now() - startTime) / 1000).toFixed(1));
+  return { sent, failed, total: to.length, errors, duration };
+};
+
+module.exports = { sendSesTestCampaign, sendSesCampaignForOrg, TEST_EMAILS };
