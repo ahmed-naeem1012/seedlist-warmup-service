@@ -62,6 +62,27 @@ const supabase = createClient(
 , { realtime: { transport: ws } }
 );
 
+// Supabase/PostgREST caps unpaginated selects at 1000 rows (db-max-rows) — page
+// through with .range() so every active mailbox gets engaged, not just the first 1000.
+const MAILBOX_PAGE_SIZE = 1000;
+const fetchAllActiveMailboxes = async () => {
+  const rows = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('auto_responder_mailboxes')
+      .select('*')
+      .eq('is_active', true)
+      .order('email', { ascending: true })
+      .range(offset, offset + MAILBOX_PAGE_SIZE - 1);
+    if (error) throw new Error(`Failed to fetch mailboxes: ${error.message}`);
+    rows.push(...data);
+    if (data.length < MAILBOX_PAGE_SIZE) break;
+    offset += MAILBOX_PAGE_SIZE;
+  }
+  return rows;
+};
+
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
 // Global browser instance (reused for all requests - MUCH faster!)
@@ -1123,15 +1144,7 @@ const engageSeedlistBrevo = async () => {
     console.log(' ✅ Browser ready!\n');
 
     // FETCH ALL MAILBOXES FROM DATABASE
-    const { data: mailboxes, error: fetchError } = await supabase
-      .from('auto_responder_mailboxes')
-      .select('*')
-      .eq('is_active', true)
-      .order('email', { ascending: true });
-
-    if (fetchError) {
-      throw new Error(`Failed to fetch mailboxes: ${fetchError.message}`);
-    }
+    const mailboxes = await fetchAllActiveMailboxes();
 
     console.log(` Found ${mailboxes.length} mailboxes in database\n`);
 

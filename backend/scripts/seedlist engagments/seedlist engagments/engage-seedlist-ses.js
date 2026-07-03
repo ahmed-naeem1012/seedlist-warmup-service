@@ -108,6 +108,27 @@ const supabase = createClient(
   , { realtime: { transport: ws } }
 );
 
+// Supabase/PostgREST caps unpaginated selects at 1000 rows (db-max-rows) — page
+// through with .range() so every active mailbox gets engaged, not just the first 1000.
+const MAILBOX_PAGE_SIZE = 1000;
+const fetchAllActiveMailboxes = async () => {
+  const rows = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('auto_responder_mailboxes')
+      .select('*')
+      .eq('is_active', true)
+      .order('email', { ascending: true })
+      .range(offset, offset + MAILBOX_PAGE_SIZE - 1);
+    if (error) throw new Error(`Failed to fetch mailboxes: ${error.message}`);
+    rows.push(...data);
+    if (data.length < MAILBOX_PAGE_SIZE) break;
+    offset += MAILBOX_PAGE_SIZE;
+  }
+  return rows;
+};
+
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
 const WORKER_CONCURRENCY = parseInt(process.env.SEEDLIST_WORKER_CONCURRENCY || '50');
@@ -401,11 +422,31 @@ const buildSearchCriteria = (checkReadEmails, sinceDate) => {
   return ['UNSEEN', ['SINCE', sinceDate]];
 };
 
-const TARGET_SENDER_SET = new Set(TARGET_SENDERS.map((s) => s.toLowerCase()));
+// Mutable — refreshed each run by refreshTargetSenders() to also include
+// active tenant senders from ses_integrations, on top of the static list above.
+let allTargetSenders = [...TARGET_SENDERS];
+let TARGET_SENDER_SET = new Set(allTargetSenders.map((s) => s.toLowerCase()));
+
 const isFromTargetSender = (email) => {
   const addr = (email.from?.value?.[0]?.address || '').toLowerCase();
   const text = (email.from?.text || '').toLowerCase();
-  return TARGET_SENDER_SET.has(addr) || TARGET_SENDERS.some((s) => text.includes(s));
+  return TARGET_SENDER_SET.has(addr) || allTargetSenders.some((s) => text.includes(s.toLowerCase()));
+};
+
+const refreshTargetSenders = async () => {
+  const { data, error } = await supabase
+    .from('ses_integrations')
+    .select('from_email')
+    .eq('is_active', true);
+
+  if (error) {
+    console.error('  [TARGET_SENDERS] Failed to load tenant senders, using static list only:', error.message);
+    return;
+  }
+
+  const tenantSenders = (data || []).map((row) => row.from_email);
+  allTargetSenders = [...new Set([...TARGET_SENDERS, ...tenantSenders])];
+  TARGET_SENDER_SET = new Set(allTargetSenders.map((s) => s.toLowerCase()));
 };
 
 const checkSpamAndMove = async (mailbox, checkReadEmails = false) => {
@@ -672,8 +713,8 @@ const engageSeedlistSes = async () => {
 
   try {
     await getBrowser();
-    const { data: mailboxes, error: fetchError } = await supabase.from('auto_responder_mailboxes').select('*').eq('is_active', true).order('email', { ascending: true });
-    if (fetchError) throw new Error(`Failed to fetch mailboxes: ${fetchError.message}`);
+    await refreshTargetSenders();
+    const mailboxes = await fetchAllActiveMailboxes();
     if (mailboxes.length === 0) return { mailboxCount: 0, mailboxesWithEmails: 0, found: 0, opened: 0, clicked: 0, duration: 0 };
 
     const limit = createConcurrencyLimiter(WORKER_CONCURRENCY);
