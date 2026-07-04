@@ -156,7 +156,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && url === '/api/ses/send-campaign') {
     try {
       const body = await parseBody(req);
-      const { orgId, fromEmail, templateId, templateData, subject, html, text } = body;
+      const { orgId, fromEmail, templateId, templateName, templateData, subject, html, text } = body;
 
       console.log(`\n[SES CAMPAIGN] org=${orgId} from=${fromEmail} templateId=${templateId || '-'} subject="${subject || ''}"`);
 
@@ -164,11 +164,58 @@ const server = http.createServer(async (req, res) => {
 
       console.log(`[SES CAMPAIGN] Done — Sent: ${result.sent} | Failed: ${result.failed} | ${result.duration}s\n`);
 
+      const { error: historyError } = await supabase
+        .from('ses_campaign_sends')
+        .insert({
+          org_id:      orgId,
+          from_email:  fromEmail,
+          template_id:   templateId || null,
+          template_name: templateName || null,
+          sent:          result.sent,
+          failed:      result.failed,
+          total:       result.total,
+          duration:    result.duration,
+        });
+
+      if (historyError) {
+        console.error('[SES CAMPAIGN] Failed to persist campaign history:', historyError.message);
+      }
+
       return json(res, 200, { success: true, ...result });
     } catch (err) {
       console.error('[SES CAMPAIGN] Error:', err.message);
       return json(res, 400, { success: false, error: err.message });
     }
+  }
+
+  // ── GET /api/ses/campaigns?orgId=... ─────────────────────────────────────
+  if (req.method === 'GET' && url === '/api/ses/campaigns') {
+    const orgId = getQuery(req).get('orgId');
+    if (!orgId) return json(res, 400, { success: false, error: 'orgId query param is required.' });
+
+    const { data, error } = await supabase
+      .from('ses_campaign_sends')
+      .select('id, from_email, template_id, template_name, sent, failed, total, duration, sent_at')
+      .eq('org_id', orgId)
+      .order('sent_at', { ascending: false })
+      .limit(50);
+
+    if (error) return json(res, 500, { success: false, error: error.message });
+
+    return json(res, 200, {
+      success: true,
+      campaigns: data.map(row => ({
+        id:         row.id,
+        fromEmail:  row.from_email,
+        templateId:   row.template_id,
+        templateName: row.template_name,
+        sentAt:       row.sent_at,
+        sent:       row.sent,
+        failed:     row.failed,
+        total:      row.total,
+        duration:   row.duration,
+      })),
+    });
   }
 
   // ── 404 ───────────────────────────────────────────────────────────────────
