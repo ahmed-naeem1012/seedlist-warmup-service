@@ -254,11 +254,13 @@ const fetchAllActiveMailboxEmails = async () => {
 };
 
 // Validates the request and resolves everything the send needs (template,
-// integration/credentials, full recipient list) up front. Kept separate from
-// executeSesSend below so callers can fail fast on bad input (missing
-// template, no integration, etc.) with a synchronous response, while the
-// actual send — which can take minutes against a large seedlist — runs in
-// the background. See migrations/003_ses_campaigns.sql for why.
+// integration/credentials) up front. Deliberately does NOT fetch the
+// recipient list — fetchAllActiveMailboxEmails() pages through the seedlist
+// 1000 rows at a time and, on its own, can take well past a minute once the
+// seedlist is large. Only point lookups (template by id, integration by
+// org+email) belong in this synchronous path; both the recipient fetch and
+// the actual sends run in the background via executeSesSend. See
+// migrations/003_ses_campaigns.sql for why.
 const prepareSesCampaign = async ({ orgId, fromEmail, templateId, templateData, subject, html, text } = {}) => {
   if (!orgId) throw new Error('orgId is required.');
   if (!fromEmail) throw new Error('fromEmail is required.');
@@ -299,20 +301,25 @@ const prepareSesCampaign = async ({ orgId, fromEmail, templateId, templateData, 
     },
   });
 
-  const to = await fetchAllActiveMailboxEmails();
-
   const body = {};
   if (html) body.Html = { Data: html, Charset: 'UTF-8' };
   if (text) body.Text = { Data: text, Charset: 'UTF-8' };
 
-  return { orgId, fromEmail, subject, body, client, to };
+  return { orgId, fromEmail, subject, body, client };
 };
 
-// Runs the actual sends prepared above. This is the slow part (one SES call
-// per recipient, throttled to SEND_CONCURRENCY) — callers should kick this
-// off in the background rather than awaiting it inline in an HTTP request.
-const executeSesSend = async ({ orgId, fromEmail, subject, body, client, to }) => {
+// Runs the actual send prepared above: fetches the full recipient list (the
+// part that can itself take well over a minute against a large seedlist —
+// see prepareSesCampaign) and then sends, throttled to SEND_CONCURRENCY.
+// Callers must run this in the background rather than awaiting it inline in
+// an HTTP request. `onRecipientsResolved`, if given, is awaited with the
+// recipient count as soon as the list is known, before sending starts, so
+// callers can persist it without waiting for the whole send to finish.
+const executeSesSend = async ({ orgId, fromEmail, subject, body, client, onRecipientsResolved }) => {
   const startTime = Date.now();
+
+  const to = await fetchAllActiveMailboxEmails();
+  if (onRecipientsResolved) await onRecipientsResolved(to.length);
 
   let sent = 0;
   let failed = 0;
