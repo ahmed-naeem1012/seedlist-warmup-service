@@ -267,7 +267,7 @@ const prepareSesCampaign = async ({ orgId, fromEmail, templateId, templateData, 
   if (!templateId && !subject) throw new Error('subject is required when not using templateId.');
   if (!templateId && !html && !text) throw new Error('At least one of templateId, html or text is required.');
 
-  if (templateId) {
+  if (templateId && !html) {
     const { data: template, error: templateError } = await supabase
       .from('templates')
       .select('*')
