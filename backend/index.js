@@ -6,7 +6,7 @@ const http = require('http');
 const fs   = require('fs');
 const path = require('path');
 
-const { sendSesTestCampaign, sendSesCampaignForOrg, TEST_EMAILS } = require('./services/sesEmailSender');
+const { sendSesTestCampaign, prepareSesCampaign, executeSesSend, TEST_EMAILS } = require('./services/sesEmailSender');
 const supabase = require('./services/supabaseClient');
 const { encrypt } = require('./utils/crypto');
 
@@ -153,6 +153,12 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── POST /api/ses/send-campaign ───────────────────────────────────────────
+  // Queues the send and returns as soon as the job is recorded — the actual
+  // sending (one SES call per active seedlist mailbox) runs in the
+  // background and can take minutes, which used to make callers (dashboard
+  // → nginx) time out waiting on this response. See
+  // migrations/003_ses_campaigns.sql. Poll GET /api/ses/campaigns?orgId=
+  // for progress.
   if (req.method === 'POST' && url === '/api/ses/send-campaign') {
     try {
       const body = await parseBody(req);
@@ -160,62 +166,85 @@ const server = http.createServer(async (req, res) => {
 
       console.log(`\n[SES CAMPAIGN] org=${orgId} from=${fromEmail} templateId=${templateId || '-'} subject="${subject || ''}"`);
 
-      const result = await sendSesCampaignForOrg({ orgId, fromEmail, templateId, templateData, subject, html, text });
+      const prepared = await prepareSesCampaign({ orgId, fromEmail, templateId, templateData, subject, html, text });
 
-      console.log(`[SES CAMPAIGN] Done — Sent: ${result.sent} | Failed: ${result.failed} | ${result.duration}s\n`);
-
-      const { error: historyError } = await supabase
-        .from('ses_campaign_sends')
+      const { data: campaign, error: insertError } = await supabase
+        .from('ses_campaigns')
         .insert({
-          org_id:      orgId,
-          from_email:  fromEmail,
-          template_id:   templateId || null,
+          org_id: orgId,
+          from_email: fromEmail,
+          template_id: templateId || null,
           template_name: templateName || null,
-          sent:          result.sent,
-          failed:      result.failed,
-          total:       result.total,
-          duration:    result.duration,
+          subject: prepared.subject,
+          status: 'sending',
+        })
+        .select('id')
+        .single();
+
+      if (insertError) return json(res, 500, { success: false, error: insertError.message });
+
+      executeSesSend({
+        ...prepared,
+        onRecipientsResolved: (total) =>
+          supabase.from('ses_campaigns').update({ total }).eq('id', campaign.id),
+      })
+        .then(async (result) => {
+          console.log(`[SES CAMPAIGN] Done — Sent: ${result.sent} | Failed: ${result.failed} | ${result.duration}s\n`);
+          await supabase
+            .from('ses_campaigns')
+            .update({
+              status: 'completed',
+              sent: result.sent,
+              failed: result.failed,
+              duration: result.duration,
+              completed_at: new Date().toISOString(),
+            })
+            .eq('id', campaign.id);
+        })
+        .catch(async (err) => {
+          console.error('[SES CAMPAIGN] Background send failed:', err.message);
+          await supabase
+            .from('ses_campaigns')
+            .update({ status: 'failed', error: err.message, completed_at: new Date().toISOString() })
+            .eq('id', campaign.id);
         });
 
-      if (historyError) {
-        console.error('[SES CAMPAIGN] Failed to persist campaign history:', historyError.message);
-      }
-
-      return json(res, 200, { success: true, ...result });
+      return json(res, 202, { success: true, id: campaign.id, status: 'sending' });
     } catch (err) {
       console.error('[SES CAMPAIGN] Error:', err.message);
       return json(res, 400, { success: false, error: err.message });
     }
   }
 
-  // ── GET /api/ses/campaigns?orgId=... ─────────────────────────────────────
+  // ── GET /api/ses/campaigns?orgId=... ──────────────────────────────────────
   if (req.method === 'GET' && url === '/api/ses/campaigns') {
     const orgId = getQuery(req).get('orgId');
     if (!orgId) return json(res, 400, { success: false, error: 'orgId query param is required.' });
 
     const { data, error } = await supabase
-      .from('ses_campaign_sends')
-      .select('id, from_email, template_id, template_name, sent, failed, total, duration, sent_at')
+      .from('ses_campaigns')
+      .select('id, from_email, template_id, template_name, status, total, sent, failed, duration, error, created_at')
       .eq('org_id', orgId)
-      .order('sent_at', { ascending: false })
+      .order('created_at', { ascending: false })
       .limit(50);
 
     if (error) return json(res, 500, { success: false, error: error.message });
 
-    return json(res, 200, {
-      success: true,
-      campaigns: data.map(row => ({
-        id:         row.id,
-        fromEmail:  row.from_email,
-        templateId:   row.template_id,
-        templateName: row.template_name,
-        sentAt:       row.sent_at,
-        sent:       row.sent,
-        failed:     row.failed,
-        total:      row.total,
-        duration:   row.duration,
-      })),
-    });
+    const campaigns = data.map((c) => ({
+      id: c.id,
+      fromEmail: c.from_email,
+      templateId: c.template_id,
+      templateName: c.template_name,
+      sentAt: c.created_at,
+      status: c.status,
+      total: c.total,
+      sent: c.sent,
+      failed: c.failed,
+      duration: c.duration,
+      error: c.error,
+    }));
+
+    return json(res, 200, { success: true, campaigns });
   }
 
   // ── 404 ───────────────────────────────────────────────────────────────────
