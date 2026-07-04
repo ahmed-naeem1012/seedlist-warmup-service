@@ -177,14 +177,17 @@ const server = http.createServer(async (req, res) => {
           template_name: templateName || null,
           subject: prepared.subject,
           status: 'sending',
-          total: prepared.to.length,
         })
-        .select('id, total')
+        .select('id')
         .single();
 
       if (insertError) return json(res, 500, { success: false, error: insertError.message });
 
-      executeSesSend(prepared)
+      executeSesSend({
+        ...prepared,
+        onRecipientsResolved: (total) =>
+          supabase.from('ses_campaigns').update({ total }).eq('id', campaign.id),
+      })
         .then(async (result) => {
           console.log(`[SES CAMPAIGN] Done — Sent: ${result.sent} | Failed: ${result.failed} | ${result.duration}s\n`);
           await supabase
@@ -206,7 +209,7 @@ const server = http.createServer(async (req, res) => {
             .eq('id', campaign.id);
         });
 
-      return json(res, 202, { success: true, id: campaign.id, status: 'sending', total: campaign.total });
+      return json(res, 202, { success: true, id: campaign.id, status: 'sending' });
     } catch (err) {
       console.error('[SES CAMPAIGN] Error:', err.message);
       return json(res, 400, { success: false, error: err.message });
