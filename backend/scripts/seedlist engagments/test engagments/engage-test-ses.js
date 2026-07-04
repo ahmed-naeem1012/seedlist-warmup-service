@@ -136,8 +136,8 @@ const supabase = createClient(
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
-const WORKER_CONCURRENCY = parseInt(process.env.SEEDLIST_WORKER_CONCURRENCY || '25');
-const MAX_PUPPETEER_PAGES = parseInt(process.env.PUPPETEER_PAGE_POOL_SIZE || '15');
+const WORKER_CONCURRENCY = parseInt(process.env.SEEDLIST_WORKER_CONCURRENCY || '8');
+const MAX_PUPPETEER_PAGES = parseInt(process.env.PUPPETEER_PAGE_POOL_SIZE || '5');
 const MAILBOX_TIMEOUT_MS = 90000;
 
 let globalBrowser = null;

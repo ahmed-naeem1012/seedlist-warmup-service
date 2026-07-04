@@ -24,26 +24,43 @@ const { engageSeedlistSes } = require('../scripts/seedlist engagments/seedlist e
 
 const STUCK_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 
-// Env-flag gate + re-entrancy lock (with stuck-job force release) + try/catch/finally,
-// shared across all 10 warmer jobs.
+// Env-flag gate + re-entrancy lock + try/catch/finally, shared across all 10
+// warmer jobs.
+//
+// IMPORTANT: a stuck job is never force-released here. Force-releasing used to
+// let the next cron tick start a brand-new overlapping run on top of a job
+// that was still executing in the background (nothing actually cancels the
+// old run's IMAP sockets / Puppeteer pages) — on a long seedlist run that
+// overlap could compound tick after tick until the server ran out of memory.
+// Instead we just skip ticks and log loudly so a stuck job is visible instead
+// of silently spawning duplicates.
 function registerWarmerJob({ label, schedule, envFlag, run }) {
   let isRunning = false;
   let startTime = null;
+  let alertedStuck = false;
 
   cron.schedule(schedule, async () => {
     if (process.env[envFlag] !== 'true') return;
 
-    if (isRunning && startTime && (Date.now() - startTime) > STUCK_JOB_TIMEOUT_MS) {
-      isRunning = false;
+    if (isRunning) {
+      const runningForMs = startTime ? Date.now() - startTime : 0;
+      if (runningForMs > STUCK_JOB_TIMEOUT_MS && !alertedStuck) {
+        alertedStuck = true;
+        const msg = `[${label}] still running after ${Math.round(runningForMs / 60000)}m — skipping ticks instead of starting an overlapping run`;
+        console.error(msg);
+        rollbar.error(new Error(msg));
+      }
+      return;
     }
-    if (isRunning) return;
 
     isRunning = true;
     startTime = Date.now();
+    alertedStuck = false;
     try {
       const result = await run();
       console.log(`[${label}]`, result);
     } catch (err) {
+      console.error(`[${label}] error:`, err.message);
       rollbar.error(err);
     } finally {
       isRunning = false;
