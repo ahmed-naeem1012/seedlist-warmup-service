@@ -253,14 +253,13 @@ const fetchAllActiveMailboxEmails = async () => {
   return emails;
 };
 
-// Sends a tenant's own campaign using their own SES keys (from ses_integrations)
-// to the full active auto_responder_mailboxes seedlist. Content comes either from
-// a saved maxify-proj template (templateId, rendered via utils/templateRenderer.js —
-// same `templates` table + block schema the dashboard's own editor/preview uses) or
-// from an explicit subject/html/text passed straight through.
-const sendSesCampaignForOrg = async ({ orgId, fromEmail, templateId, templateData, subject, html, text } = {}) => {
-  const startTime = Date.now();
-
+// Validates the request and resolves everything the send needs (template,
+// integration/credentials, full recipient list) up front. Kept separate from
+// executeSesSend below so callers can fail fast on bad input (missing
+// template, no integration, etc.) with a synchronous response, while the
+// actual send — which can take minutes against a large seedlist — runs in
+// the background. See migrations/003_ses_campaigns.sql for why.
+const prepareSesCampaign = async ({ orgId, fromEmail, templateId, templateData, subject, html, text } = {}) => {
   if (!orgId) throw new Error('orgId is required.');
   if (!fromEmail) throw new Error('fromEmail is required.');
   if (!templateId && !subject) throw new Error('subject is required when not using templateId.');
@@ -306,6 +305,15 @@ const sendSesCampaignForOrg = async ({ orgId, fromEmail, templateId, templateDat
   if (html) body.Html = { Data: html, Charset: 'UTF-8' };
   if (text) body.Text = { Data: text, Charset: 'UTF-8' };
 
+  return { orgId, fromEmail, subject, body, client, to };
+};
+
+// Runs the actual sends prepared above. This is the slow part (one SES call
+// per recipient, throttled to SEND_CONCURRENCY) — callers should kick this
+// off in the background rather than awaiting it inline in an HTTP request.
+const executeSesSend = async ({ orgId, fromEmail, subject, body, client, to }) => {
+  const startTime = Date.now();
+
   let sent = 0;
   let failed = 0;
   const errors = [];
@@ -339,4 +347,4 @@ const sendSesCampaignForOrg = async ({ orgId, fromEmail, templateId, templateDat
   return { sent, failed, total: to.length, errors, duration };
 };
 
-module.exports = { sendSesTestCampaign, sendSesCampaignForOrg, TEST_EMAILS };
+module.exports = { sendSesTestCampaign, prepareSesCampaign, executeSesSend, TEST_EMAILS };
