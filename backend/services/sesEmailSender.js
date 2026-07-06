@@ -354,4 +354,99 @@ const executeSesSend = async ({ orgId, fromEmail, subject, body, client, onRecip
   return { sent, failed, total: to.length, errors, duration };
 };
 
-module.exports = { sendSesTestCampaign, prepareSesCampaign, executeSesSend, TEST_EMAILS };
+// Runs one send for an existing ses_campaigns definition row — the first
+// send (called synchronously-in-background by the API route right after the
+// definition row is inserted) and every recurring daily resend (called by
+// the cron job in cronJobs.js) both go through this one path. Never inserts
+// into ses_campaigns itself — campaignRow.id must already exist — it only
+// logs the run to ses_campaign_sends and updates both rows' status on
+// completion.
+const runCampaignSend = async (campaignRow) => {
+  const {
+    id: campaignId,
+    org_id: orgId,
+    from_email: fromEmail,
+    template_id: templateId,
+    template_name: templateName,
+    template_data: templateData,
+    subject,
+    html,
+    text,
+  } = campaignRow;
+
+  // prepareSesCampaign and the ses_campaign_sends insert live inside this
+  // try too — if either throws before a send even starts, the catch below
+  // still needs to flip the parent ses_campaigns row out of 'sending',
+  // otherwise it's stuck there forever with no retry (the cron's due-query
+  // excludes 'sending' rows from every future tick).
+  let sendRow;
+  try {
+    const prepared = await prepareSesCampaign({ orgId, fromEmail, templateId, templateData, subject, html, text });
+
+    const { data, error: insertError } = await supabase
+      .from('ses_campaign_sends')
+      .insert({
+        campaign_id: campaignId,
+        org_id: orgId,
+        from_email: fromEmail,
+        template_id: templateId || null,
+        template_name: templateName || null,
+        status: 'sending',
+        sent_at: new Date().toISOString(),
+      })
+      .select('id')
+      .single();
+
+    if (insertError) throw new Error(`Failed to create campaign send log: ${insertError.message}`);
+    sendRow = data;
+
+    const result = await executeSesSend({
+      ...prepared,
+      onRecipientsResolved: (total) =>
+        supabase.from('ses_campaigns').update({ total }).eq('id', campaignId),
+    });
+
+    await supabase
+      .from('ses_campaign_sends')
+      .update({
+        status: 'completed',
+        sent: result.sent,
+        failed: result.failed,
+        total: result.total,
+        duration: result.duration,
+        error: null,
+      })
+      .eq('id', sendRow.id);
+
+    await supabase
+      .from('ses_campaigns')
+      .update({
+        status: 'completed',
+        sent: result.sent,
+        failed: result.failed,
+        total: result.total,
+        duration: result.duration,
+        error: null,
+        completed_at: new Date().toISOString(),
+      })
+      .eq('id', campaignId);
+
+    return result;
+  } catch (err) {
+    if (sendRow) {
+      await supabase
+        .from('ses_campaign_sends')
+        .update({ status: 'failed', error: err.message })
+        .eq('id', sendRow.id);
+    }
+
+    await supabase
+      .from('ses_campaigns')
+      .update({ status: 'failed', error: err.message, completed_at: new Date().toISOString() })
+      .eq('id', campaignId);
+
+    throw err;
+  }
+};
+
+module.exports = { sendSesTestCampaign, prepareSesCampaign, executeSesSend, runCampaignSend, TEST_EMAILS };
