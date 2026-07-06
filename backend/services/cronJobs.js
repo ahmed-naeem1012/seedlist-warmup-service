@@ -1,6 +1,9 @@
 const cron = require('node-cron');
 const rollbar = require('../middlewares/trackers/rollbar');
 
+const supabase = require('./supabaseClient');
+const { runCampaignSend } = require('./sesEmailSender');
+
 const { engageTestBrevo } = require('../scripts/seedlist engagments/test engagments/engage-test-brevo');
 const { engageSeedlistBrevo } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-brevo');
 const { engageSeedlistEmails: engageSeedlistBrevoV2 } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-brevo-v2');
@@ -89,5 +92,56 @@ registerWarmerJob({ label: 'Drip Test', schedule: '*/3 * * * *', envFlag: 'DRIP_
 registerWarmerJob({ label: 'Drip Seedlist', schedule: '*/1 * * * *', envFlag: 'DRIP_SEEDLIST_WARMER', run: engageSeedlistDrip });
 registerWarmerJob({ label: 'SES Test', schedule: '*/1 * * * *', envFlag: 'SES_TEST_WARMER', run: engageTestSes });
 registerWarmerJob({ label: 'SES Seedlist', schedule: '*/1 * * * *', envFlag: 'SES_SEEDLIST_WARMER', run: engageSeedlistSes });
+
+const CAMPAIGN_RESEND_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+// Every active ses_campaigns row recurs daily forever until paused
+// (is_active = false) — there's no per-campaign opt-in. Polls hourly rather
+// than firing once at a fixed daily time so a missed tick or a process
+// restart doesn't push a campaign's resend by a full day; the last_run_at
+// age check is what actually enforces the 24h cadence.
+async function resendDueSesCampaigns() {
+  const cutoff = new Date(Date.now() - CAMPAIGN_RESEND_INTERVAL_MS).toISOString();
+
+  const { data: dueCampaigns, error } = await supabase
+    .from('ses_campaigns')
+    .select('*')
+    .eq('is_active', true)
+    .neq('status', 'sending')
+    .or(`last_run_at.is.null,last_run_at.lte.${cutoff}`);
+
+  if (error) throw new Error(`Failed to load due SES campaigns: ${error.message}`);
+  if (!dueCampaigns || dueCampaigns.length === 0) return { checked: 0, started: 0 };
+
+  let started = 0;
+
+  for (const campaign of dueCampaigns) {
+    // Guarded claim: stops an overlapping tick (or a slow-running previous
+    // send still in flight) from double-firing the same campaign. Only
+    // proceed if this update actually flipped a row — if another tick
+    // claimed it first, status is already 'sending' and 0 rows come back.
+    const { data: claimed, error: claimError } = await supabase
+      .from('ses_campaigns')
+      .update({ status: 'sending', last_run_at: new Date().toISOString() })
+      .eq('id', campaign.id)
+      .neq('status', 'sending')
+      .select('id');
+
+    if (claimError) {
+      console.error(`[SES Recurring] Failed to claim campaign ${campaign.id}:`, claimError.message);
+      continue;
+    }
+    if (!claimed || claimed.length === 0) continue;
+
+    started++;
+    runCampaignSend(campaign).catch((err) => {
+      console.error(`[SES Recurring] Campaign ${campaign.id} send failed:`, err.message);
+    });
+  }
+
+  return { checked: dueCampaigns.length, started };
+}
+
+registerWarmerJob({ label: 'SES Recurring Campaigns', schedule: '0 * * * *', envFlag: 'SES_RECURRING_CAMPAIGN_WARMER', run: resendDueSesCampaigns });
 
 console.log('Seedlist warmer cron jobs registered.');
