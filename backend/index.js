@@ -6,7 +6,7 @@ const http = require('http');
 const fs   = require('fs');
 const path = require('path');
 
-const { sendSesTestCampaign, prepareSesCampaign, executeSesSend, TEST_EMAILS } = require('./services/sesEmailSender');
+const { sendSesTestCampaign, prepareSesCampaign, executeSesSend, runCampaignSend, TEST_EMAILS } = require('./services/sesEmailSender');
 const supabase = require('./services/supabaseClient');
 const { encrypt } = require('./utils/crypto');
 
@@ -123,6 +123,54 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ── POST /api/integrations/ses/bulk ───────────────────────────────────────
+  if (req.method === 'POST' && url === '/api/integrations/ses/bulk') {
+    try {
+      const body = await parseBody(req);
+      const { orgId, awsRegion, awsAccessKeyId, awsSecretAccessKey, fromEmails } = body;
+
+      if (!orgId || !awsRegion || !awsAccessKeyId || !awsSecretAccessKey || !Array.isArray(fromEmails) || fromEmails.length === 0) {
+        return json(res, 400, {
+          success: false,
+          error: 'orgId, awsRegion, awsAccessKeyId, awsSecretAccessKey and a non-empty fromEmails array are all required.',
+        });
+      }
+
+      if (!fromEmails.every(e => typeof e === 'string' && e.trim())) {
+        return json(res, 400, { success: false, error: 'fromEmails must be an array of non-empty strings.' });
+      }
+
+      const uniqueFromEmails = [...new Set(fromEmails.map(e => e.trim()))];
+
+      const MAX_BULK_EMAILS = 100;
+      if (uniqueFromEmails.length > MAX_BULK_EMAILS) {
+        return json(res, 400, {
+          success: false,
+          error: `fromEmails exceeds the maximum of ${MAX_BULK_EMAILS} entries.`,
+        });
+      }
+
+      const rows = uniqueFromEmails.map(fromEmail => ({
+        org_id: orgId,
+        from_email: fromEmail,
+        aws_region: awsRegion,
+        aws_access_key_id_enc: encrypt(awsAccessKeyId),
+        aws_secret_access_key_enc: encrypt(awsSecretAccessKey),
+        is_active: true,
+      }));
+
+      const { data, error } = await supabase
+        .from('ses_integrations')
+        .upsert(rows, { onConflict: 'org_id,from_email' })
+        .select('id, org_id, from_email, aws_region, is_active, created_at, updated_at');
+
+      if (error) return json(res, 500, { success: false, error: error.message });
+      return json(res, 200, { success: true, integrations: data });
+    } catch (err) {
+      return json(res, 500, { success: false, error: err.message });
+    }
+  }
+
   // ── GET /api/integrations/ses?orgId=... ───────────────────────────────────
   if (req.method === 'GET' && url === '/api/integrations/ses') {
     const orgId = getQuery(req).get('orgId');
@@ -159,6 +207,12 @@ const server = http.createServer(async (req, res) => {
   // → nginx) time out waiting on this response. See
   // migrations/003_ses_campaigns.sql. Poll GET /api/ses/campaigns?orgId=
   // for progress.
+  //
+  // This creates the campaign *definition* row exactly once. It must never
+  // run again for the same campaign — every day after this one, the
+  // recurring cron job in services/cronJobs.js resends against this same
+  // row via runCampaignSend(), it never inserts a new ses_campaigns row. See
+  // migrations/005_ses_campaigns_recurring.sql.
   if (req.method === 'POST' && url === '/api/ses/send-campaign') {
     try {
       const body = await parseBody(req);
@@ -175,38 +229,25 @@ const server = http.createServer(async (req, res) => {
           from_email: fromEmail,
           template_id: templateId || null,
           template_name: templateName || null,
+          template_data: templateData || null,
           subject: prepared.subject,
+          html: html || null,
+          text: text || null,
           status: 'sending',
+          is_active: true,
+          last_run_at: new Date().toISOString(),
         })
-        .select('id')
+        .select('*')
         .single();
 
       if (insertError) return json(res, 500, { success: false, error: insertError.message });
 
-      executeSesSend({
-        ...prepared,
-        onRecipientsResolved: (total) =>
-          supabase.from('ses_campaigns').update({ total }).eq('id', campaign.id),
-      })
-        .then(async (result) => {
+      runCampaignSend(campaign)
+        .then((result) => {
           console.log(`[SES CAMPAIGN] Done — Sent: ${result.sent} | Failed: ${result.failed} | ${result.duration}s\n`);
-          await supabase
-            .from('ses_campaigns')
-            .update({
-              status: 'completed',
-              sent: result.sent,
-              failed: result.failed,
-              duration: result.duration,
-              completed_at: new Date().toISOString(),
-            })
-            .eq('id', campaign.id);
         })
-        .catch(async (err) => {
+        .catch((err) => {
           console.error('[SES CAMPAIGN] Background send failed:', err.message);
-          await supabase
-            .from('ses_campaigns')
-            .update({ status: 'failed', error: err.message, completed_at: new Date().toISOString() })
-            .eq('id', campaign.id);
         });
 
       return json(res, 202, { success: true, id: campaign.id, status: 'sending' });
@@ -223,7 +264,7 @@ const server = http.createServer(async (req, res) => {
 
     const { data, error } = await supabase
       .from('ses_campaigns')
-      .select('id, from_email, template_id, template_name, status, total, sent, failed, duration, error, created_at')
+      .select('id, from_email, template_id, template_name, status, total, sent, failed, duration, error, is_active, last_run_at, created_at')
       .eq('org_id', orgId)
       .order('created_at', { ascending: false })
       .limit(50);
@@ -242,9 +283,27 @@ const server = http.createServer(async (req, res) => {
       failed: c.failed,
       duration: c.duration,
       error: c.error,
+      isActive: c.is_active,
+      lastRunAt: c.last_run_at,
     }));
 
     return json(res, 200, { success: true, campaigns });
+  }
+
+  // ── DELETE /api/ses/campaigns/:id ─────────────────────────────────────────
+  // Soft-stop: pauses the recurring daily resend without deleting history.
+  // Same pattern as DELETE /api/integrations/ses/:id.
+  if (req.method === 'DELETE' && url.startsWith('/api/ses/campaigns/')) {
+    const id = url.slice('/api/ses/campaigns/'.length);
+    if (!id) return json(res, 400, { success: false, error: 'Campaign id is required.' });
+
+    const { error } = await supabase
+      .from('ses_campaigns')
+      .update({ is_active: false })
+      .eq('id', id);
+
+    if (error) return json(res, 500, { success: false, error: error.message });
+    return json(res, 200, { success: true });
   }
 
   // ── 404 ───────────────────────────────────────────────────────────────────
