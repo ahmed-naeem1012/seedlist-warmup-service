@@ -208,10 +208,11 @@ const server = http.createServer(async (req, res) => {
   // migrations/003_ses_campaigns.sql. Poll GET /api/ses/campaigns?orgId=
   // for progress.
   //
-  // This creates the campaign *definition* row exactly once. It must never
-  // run again for the same campaign — every day after this one, the
-  // recurring cron job in services/cronJobs.js resends against this same
-  // row via runCampaignSend(), it never inserts a new ses_campaigns row. See
+  // This creates or reuses the campaign *definition* row — it must never
+  // insert a second row for a template+sender that's already recurring.
+  // Every day after the first send, the recurring cron job in
+  // services/cronJobs.js resends against this same row via
+  // runCampaignSend(), it never inserts a new ses_campaigns row. See
   // migrations/005_ses_campaigns_recurring.sql.
   if (req.method === 'POST' && url === '/api/ses/send-campaign') {
     try {
@@ -222,25 +223,73 @@ const server = http.createServer(async (req, res) => {
 
       const prepared = await prepareSesCampaign({ orgId, fromEmail, templateId, templateData, subject, html, text });
 
-      const { data: campaign, error: insertError } = await supabase
-        .from('ses_campaigns')
-        .insert({
-          org_id: orgId,
-          from_email: fromEmail,
-          template_id: templateId || null,
-          template_name: templateName || null,
-          template_data: templateData || null,
-          subject: prepared.subject,
-          html: html || null,
-          text: text || null,
-          status: 'sending',
-          is_active: true,
-          last_run_at: new Date().toISOString(),
-        })
-        .select('*')
-        .single();
+      let campaign;
 
-      if (insertError) return json(res, 500, { success: false, error: insertError.message });
+      // Saving a template auto-triggers this route once per connected
+      // sender. Without this lookup, every edit+resave would insert a brand
+      // new recurring campaign alongside the old one instead of updating
+      // it — both would then go on sending daily forever, compounding with
+      // every edit. Reuse the existing definition row for this
+      // org+sender+template instead of always inserting.
+      if (templateId) {
+        const { data: existing, error: lookupError } = await supabase
+          .from('ses_campaigns')
+          .select('*')
+          .eq('org_id', orgId)
+          .eq('from_email', fromEmail)
+          .eq('template_id', templateId)
+          .limit(1)
+          .maybeSingle();
+
+        if (lookupError) return json(res, 500, { success: false, error: lookupError.message });
+
+        if (existing) {
+          // Deliberately not touching is_active here: if the user paused
+          // this campaign, editing the template later shouldn't silently
+          // resume it behind their back. Pausing stays paused until they
+          // explicitly resume it. The edit still sends right now regardless
+          // — is_active only gates the cron's daily pickup, not this
+          // direct call.
+          const { data: updated, error: updateError } = await supabase
+            .from('ses_campaigns')
+            .update({
+              template_data: templateData || null,
+              subject: prepared.subject,
+              html: html || null,
+              text: text || null,
+              last_run_at: new Date().toISOString(),
+            })
+            .eq('id', existing.id)
+            .select('*')
+            .single();
+
+          if (updateError) return json(res, 500, { success: false, error: updateError.message });
+          campaign = updated;
+        }
+      }
+
+      if (!campaign) {
+        const { data: inserted, error: insertError } = await supabase
+          .from('ses_campaigns')
+          .insert({
+            org_id: orgId,
+            from_email: fromEmail,
+            template_id: templateId || null,
+            template_name: templateName || null,
+            template_data: templateData || null,
+            subject: prepared.subject,
+            html: html || null,
+            text: text || null,
+            status: 'sending',
+            is_active: true,
+            last_run_at: new Date().toISOString(),
+          })
+          .select('*')
+          .single();
+
+        if (insertError) return json(res, 500, { success: false, error: insertError.message });
+        campaign = inserted;
+      }
 
       runCampaignSend(campaign)
         .then((result) => {
@@ -300,6 +349,23 @@ const server = http.createServer(async (req, res) => {
     const { error } = await supabase
       .from('ses_campaigns')
       .update({ is_active: false })
+      .eq('id', id);
+
+    if (error) return json(res, 500, { success: false, error: error.message });
+    return json(res, 200, { success: true });
+  }
+
+  // ── POST /api/ses/campaigns/:id/resume ────────────────────────────────────
+  // Un-pauses a campaign. Only flips is_active back on — last_run_at is left
+  // untouched so the normal due-check on the next cron tick decides whether
+  // it's immediately due or still has to wait out the rest of the 24h window.
+  if (req.method === 'POST' && url.startsWith('/api/ses/campaigns/') && url.endsWith('/resume')) {
+    const id = url.slice('/api/ses/campaigns/'.length, url.length - '/resume'.length);
+    if (!id) return json(res, 400, { success: false, error: 'Campaign id is required.' });
+
+    const { error } = await supabase
+      .from('ses_campaigns')
+      .update({ is_active: true })
       .eq('id', id);
 
     if (error) return json(res, 500, { success: false, error: error.message });
