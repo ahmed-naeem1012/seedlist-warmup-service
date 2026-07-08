@@ -9,8 +9,11 @@ const path = require('path');
 const { sendSesTestCampaign, prepareSesCampaign, executeSesSend, runCampaignSend, TEST_EMAILS } = require('./services/sesEmailSender');
 const supabase = require('./services/supabaseClient');
 const { encrypt } = require('./utils/crypto');
+const { resolveOrgSesCredentials, createDomainIdentity } = require('./services/sesDomainIdentity');
 
 const port = process.env.PORT || 3000;
+
+const DOMAIN_REGEX = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i;
 
 const parseBody = (req) =>
   new Promise((resolve) => {
@@ -198,6 +201,169 @@ const server = http.createServer(async (req, res) => {
 
     if (error) return json(res, 500, { success: false, error: error.message });
     return json(res, 200, { success: true });
+  }
+
+  // ── POST /api/domains ──────────────────────────────────────────────────────
+  // Adds a sending domain for DKIM verification. Calls real AWS SESv2
+  // CreateEmailIdentity (services/sesDomainIdentity.js) using the org's
+  // stored ses_integrations credentials — the 3 CNAME records saved here
+  // are the actual tokens AWS returns, not locally generated placeholders.
+  if (req.method === 'POST' && url === '/api/domains') {
+    try {
+      const body = await parseBody(req);
+      const { orgId } = body;
+      const domain = (body.domain || '').trim().toLowerCase();
+
+      if (!orgId || !domain) {
+        return json(res, 400, { success: false, error: 'orgId and domain are required.' });
+      }
+      if (!DOMAIN_REGEX.test(domain)) {
+        return json(res, 400, { success: false, error: 'Enter a valid domain, e.g. yourdomain.com.' });
+      }
+
+      const { data: existing, error: lookupError } = await supabase
+        .from('ses_domains')
+        .select('id')
+        .eq('org_id', orgId)
+        .eq('domain', domain)
+        .maybeSingle();
+
+      if (lookupError) return json(res, 500, { success: false, error: lookupError.message });
+      if (existing) {
+        return json(res, 409, { success: false, error: 'This domain has already been added.' });
+      }
+
+      let credentials;
+      try {
+        credentials = await resolveOrgSesCredentials(orgId);
+      } catch (err) {
+        return json(res, 400, { success: false, error: err.message });
+      }
+
+      let tokens;
+      try {
+        tokens = await createDomainIdentity({ ...credentials, domain });
+      } catch (err) {
+        return json(res, 502, { success: false, error: `AWS SES rejected this domain: ${err.message}` });
+      }
+
+      const cnameRecords = tokens.map((token) => ({
+        name: `${token}._domainkey.${domain}`,
+        value: `${token}.dkim.amazonses.com`,
+      }));
+
+      const { data, error } = await supabase
+        .from('ses_domains')
+        .insert({ org_id: orgId, domain, cname_records: cnameRecords, aws_region: credentials.region })
+        .select('id, domain, cname_records, status, created_at, updated_at')
+        .single();
+
+      if (error) return json(res, 500, { success: false, error: error.message });
+      return json(res, 200, { success: true, domain: data });
+    } catch (err) {
+      return json(res, 500, { success: false, error: err.message });
+    }
+  }
+
+  // ── GET /api/domains?orgId=... ─────────────────────────────────────────────
+  if (req.method === 'GET' && url === '/api/domains') {
+    const orgId = getQuery(req).get('orgId');
+    if (!orgId) return json(res, 400, { success: false, error: 'orgId query param is required.' });
+
+    const { data, error } = await supabase
+      .from('ses_domains')
+      .select('id, domain, cname_records, status, created_at, updated_at')
+      .eq('org_id', orgId)
+      .order('created_at', { ascending: false });
+
+    if (error) return json(res, 500, { success: false, error: error.message });
+    return json(res, 200, { success: true, domains: data });
+  }
+
+  // ── DELETE /api/domains/:id?orgId=... ──────────────────────────────────────
+  if (req.method === 'DELETE' && url.startsWith('/api/domains/')) {
+    const id = url.slice('/api/domains/'.length);
+    const orgId = getQuery(req).get('orgId');
+    if (!id) return json(res, 400, { success: false, error: 'Domain id is required.' });
+    if (!orgId) return json(res, 400, { success: false, error: 'orgId query param is required.' });
+
+    const { error } = await supabase
+      .from('ses_domains')
+      .delete()
+      .eq('id', id)
+      .eq('org_id', orgId);
+
+    if (error) return json(res, 500, { success: false, error: error.message });
+    return json(res, 200, { success: true });
+  }
+
+  // ── POST /api/domains/:id/senders ──────────────────────────────────────────
+  // Adds a "From" sender at a verified domain, reusing the org's existing
+  // active ses_integrations credentials (copied as-is, ciphertext to
+  // ciphertext — never decrypted here) so the user never re-enters AWS keys
+  // just to add another sender address. Lands in ses_integrations, the same
+  // table the campaigns tab's "Send from" dropdown already reads from.
+  if (req.method === 'POST' && url.startsWith('/api/domains/') && url.endsWith('/senders')) {
+    try {
+      const id = url.slice('/api/domains/'.length, url.length - '/senders'.length);
+      const body = await parseBody(req);
+      const { orgId } = body;
+      const fromEmail = (body.fromEmail || '').trim();
+
+      if (!id || !orgId || !fromEmail) {
+        return json(res, 400, { success: false, error: 'orgId, domain id and fromEmail are required.' });
+      }
+
+      const { data: domainRow, error: domainError } = await supabase
+        .from('ses_domains')
+        .select('domain, status')
+        .eq('id', id)
+        .eq('org_id', orgId)
+        .maybeSingle();
+
+      if (domainError) return json(res, 500, { success: false, error: domainError.message });
+      if (!domainRow) return json(res, 404, { success: false, error: 'Domain not found.' });
+      if (domainRow.status !== 'verified') {
+        return json(res, 400, { success: false, error: 'This domain must be verified before adding senders.' });
+      }
+
+      const emailDomain = fromEmail.split('@')[1]?.toLowerCase();
+      if (emailDomain !== domainRow.domain) {
+        return json(res, 400, { success: false, error: `Sender email must be at ${domainRow.domain}.` });
+      }
+
+      const { data: sourceIntegration, error: sourceError } = await supabase
+        .from('ses_integrations')
+        .select('aws_region, aws_access_key_id_enc, aws_secret_access_key_enc')
+        .eq('org_id', orgId)
+        .eq('is_active', true)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (sourceError) return json(res, 500, { success: false, error: sourceError.message });
+      if (!sourceIntegration) {
+        return json(res, 400, { success: false, error: 'No active AWS SES integration found for this organization. Add your AWS SES credentials first.' });
+      }
+
+      const { data, error } = await supabase
+        .from('ses_integrations')
+        .upsert({
+          org_id: orgId,
+          from_email: fromEmail,
+          aws_region: sourceIntegration.aws_region,
+          aws_access_key_id_enc: sourceIntegration.aws_access_key_id_enc,
+          aws_secret_access_key_enc: sourceIntegration.aws_secret_access_key_enc,
+          is_active: true,
+        }, { onConflict: 'org_id,from_email' })
+        .select('id, from_email, aws_region, is_active, created_at, updated_at')
+        .single();
+
+      if (error) return json(res, 500, { success: false, error: error.message });
+      return json(res, 200, { success: true, integration: data });
+    } catch (err) {
+      return json(res, 500, { success: false, error: err.message });
+    }
   }
 
   // ── POST /api/ses/send-campaign ───────────────────────────────────────────
