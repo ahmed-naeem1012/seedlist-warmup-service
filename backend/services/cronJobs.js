@@ -144,4 +144,59 @@ async function resendDueSesCampaigns() {
 
 registerWarmerJob({ label: 'SES Recurring Campaigns', schedule: '0 * * * *', envFlag: 'SES_RECURRING_CAMPAIGN_WARMER', run: resendDueSesCampaigns });
 
+const { resolveOrgSesCredentials, getDomainVerificationStatus } = require('./sesDomainIdentity');
+
+// Dashboard's "Domains & DKIM" tab shows every ses_domains row as
+// 'pending' until this flips it — AWS itself only checks DNS for the CNAME
+// records on its own schedule, we just have to ask it. Only ever reads
+// status = 'pending' rows so verified/failed domains stop costing API
+// calls once they're resolved.
+async function pollPendingSesDomainVerifications() {
+  const { data: pendingDomains, error } = await supabase
+    .from('ses_domains')
+    .select('id, org_id, domain, aws_region')
+    .eq('status', 'pending');
+
+  if (error) throw new Error(`Failed to load pending SES domains: ${error.message}`);
+  if (!pendingDomains || pendingDomains.length === 0) return { checked: 0, verified: 0, failed: 0 };
+
+  let verified = 0;
+  let failed = 0;
+
+  for (const row of pendingDomains) {
+    try {
+      // Credentials are account-wide, but the region must be the one this
+      // identity was actually created in — see getDomainVerificationStatus.
+      const { accessKeyId, secretAccessKey } = await resolveOrgSesCredentials(row.org_id);
+      const status = await getDomainVerificationStatus({
+        region: row.aws_region,
+        accessKeyId,
+        secretAccessKey,
+        domain: row.domain,
+      });
+
+      if (status === 'pending') continue;
+
+      const { error: updateError } = await supabase
+        .from('ses_domains')
+        .update({ status })
+        .eq('id', row.id);
+
+      if (updateError) {
+        console.error(`[SES Domain Verification] Failed to update ${row.domain}:`, updateError.message);
+        continue;
+      }
+
+      if (status === 'verified') verified++;
+      if (status === 'failed') failed++;
+    } catch (err) {
+      console.error(`[SES Domain Verification] Failed to check ${row.domain} (org ${row.org_id}):`, err.message);
+    }
+  }
+
+  return { checked: pendingDomains.length, verified, failed };
+}
+
+registerWarmerJob({ label: 'SES Domain Verification', schedule: '*/5 * * * *', envFlag: 'SES_DOMAIN_VERIFICATION_WARMER', run: pollPendingSesDomainVerifications });
+
 console.log('Seedlist warmer cron jobs registered.');
