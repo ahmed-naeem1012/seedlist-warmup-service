@@ -2,8 +2,20 @@
 // (same block types, same markup/styles) so a template renders the same way
 // here as it does in the dashboard's own preview. TS types stripped only.
 
+// Only these three resolve to real data — they're filled in per-recipient at
+// send time from the recipient's own email address (see
+// utils/personalization.js). Any other {{word}} is a stray/unsupported
+// variable and is dropped entirely rather than left as literal "{{foo}}"
+// text in the sent email. When a whitelisted var isn't in `data` yet (block
+// rendering happens before the recipient is known), it's left untouched so
+// the per-recipient pass at send time can still resolve it.
+const RECIPIENT_VARIABLES = new Set(['first_name', 'last_name', 'email']);
+
 const renderHandlebars = (template, data) =>
-  template.replace(/\{\{(\w+)\}\}/g, (match, key) => (data[key] !== undefined ? String(data[key]) : match));
+  template.replace(/\{\{\s*(\w+)\s*\}\}/g, (match, key) => {
+    if (!RECIPIENT_VARIABLES.has(key)) return '';
+    return data[key] !== undefined && data[key] !== null ? String(data[key]) : match;
+  });
 
 const renderBlock = (block, data) => {
   const style = block.style || {};
@@ -211,4 +223,4 @@ const renderTemplate = (template, data = {}) => {
   `;
 };
 
-module.exports = { renderTemplate };
+module.exports = { renderTemplate, renderHandlebars };

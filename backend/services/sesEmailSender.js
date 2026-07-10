@@ -4,7 +4,8 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const supabase = require('./supabaseClient');
 const { decrypt } = require('../utils/crypto');
-const { renderTemplate } = require('../utils/templateRenderer');
+const { renderTemplate, renderHandlebars } = require('../utils/templateRenderer');
+const { derivePersonalizationVariables } = require('../utils/personalization');
 
 // The same 100 test auto-responder mailboxes that engage-test-ses.js monitors.
 // These receive the SES campaign so the engagement cron has emails to open/click.
@@ -331,12 +332,22 @@ const executeSesSend = async ({ orgId, fromEmail, subject, body, client, onRecip
     to.map(email =>
       limit(async () => {
         try {
+          // {{first_name}}/{{last_name}}/{{email}} are the only variables
+          // that survive template rendering unresolved (see
+          // templateRenderer.js) — this is where they finally get filled in,
+          // per recipient, from that recipient's own address.
+          const vars = derivePersonalizationVariables(email);
+          const personalizedSubject = renderHandlebars(subject || '', vars);
+          const personalizedBody = {};
+          if (body.Html) personalizedBody.Html = { ...body.Html, Data: renderHandlebars(body.Html.Data, vars) };
+          if (body.Text) personalizedBody.Text = { ...body.Text, Data: renderHandlebars(body.Text.Data, vars) };
+
           await client.send(new SendEmailCommand({
             Source: fromEmail,
             Destination: { ToAddresses: [email] },
             Message: {
-              Subject: { Data: subject, Charset: 'UTF-8' },
-              Body: body,
+              Subject: { Data: personalizedSubject, Charset: 'UTF-8' },
+              Body: personalizedBody,
             },
           }));
           sent++;
