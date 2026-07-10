@@ -10,6 +10,7 @@ const { sendSesTestCampaign, prepareSesCampaign, executeSesSend, runCampaignSend
 const supabase = require('./services/supabaseClient');
 const { encrypt } = require('./utils/crypto');
 const { resolveOrgSesCredentials, createDomainIdentity } = require('./services/sesDomainIdentity');
+const { validateAwsSesCredentials } = require('./services/sesCredentialValidator');
 
 const port = process.env.PORT || 3000;
 
@@ -106,6 +107,12 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
+      try {
+        await validateAwsSesCredentials({ accessKeyId: awsAccessKeyId, secretAccessKey: awsSecretAccessKey, region: awsRegion });
+      } catch (validationErr) {
+        return json(res, 400, { success: false, error: validationErr.message });
+      }
+
       const { data, error } = await supabase
         .from('ses_integrations')
         .upsert({
@@ -153,6 +160,14 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
+      try {
+        // One key pair is shared across every row in the batch — validate it
+        // once up front rather than per-row against the same credentials.
+        await validateAwsSesCredentials({ accessKeyId: awsAccessKeyId, secretAccessKey: awsSecretAccessKey, region: awsRegion });
+      } catch (validationErr) {
+        return json(res, 400, { success: false, error: validationErr.message });
+      }
+
       const rows = uniqueFromEmails.map(fromEmail => ({
         org_id: orgId,
         from_email: fromEmail,
@@ -194,12 +209,33 @@ const server = http.createServer(async (req, res) => {
     const id = url.slice('/api/integrations/ses/'.length);
     if (!id) return json(res, 400, { success: false, error: 'Integration id is required.' });
 
-    const { error } = await supabase
+    const { data: integration, error } = await supabase
       .from('ses_integrations')
       .update({ is_active: false })
-      .eq('id', id);
+      .eq('id', id)
+      .select('org_id, from_email')
+      .single();
 
     if (error) return json(res, 500, { success: false, error: error.message });
+
+    // A deleted sender can't send tomorrow's resend either. Without this,
+    // its ses_campaigns row stays is_active=true and the daily cron
+    // (resendDueSesCampaigns) keeps picking it up forever, failing each time
+    // in prepareSesCampaign with "No active SES integration found" instead
+    // of ever stopping — and the dashboard keeps showing it as "Recurring
+    // daily" since that badge reads straight off is_active.
+    if (integration) {
+      const { error: campaignsError } = await supabase
+        .from('ses_campaigns')
+        .update({ is_active: false })
+        .eq('org_id', integration.org_id)
+        .eq('from_email', integration.from_email);
+
+      if (campaignsError) {
+        console.error('[DELETE integration] Failed to pause associated campaigns:', campaignsError.message);
+      }
+    }
+
     return json(res, 200, { success: true });
   }
 
