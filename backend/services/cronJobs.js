@@ -98,6 +98,7 @@ const CAMPAIGN_RESEND_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // Every active ses_campaigns row recurs daily forever until paused
 // (is_active = false) — there's no per-campaign opt-in. Polls hourly rather
 // than firing once at a fixed daily time so a missed tick or a process
+
 // restart doesn't push a campaign's resend by a full day; the last_run_at
 // age check is what actually enforces the 24h cadence.
 async function resendDueSesCampaigns() {
