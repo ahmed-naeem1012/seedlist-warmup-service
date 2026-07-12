@@ -229,20 +229,50 @@ const sendSesTestCampaign = async ({ subject, fromEmail, recipients, clickUrl } 
   return { sent, failed, total: to.length, errors, duration };
 };
 
+// auto_responder_mailboxes is Google-infrastructure-only (imap_host/smtp_host
+// default to imap.gmail.com/smtp.gmail.com) — the only real split within it
+// is @gmail.com vs. custom-domain (Google Workspace) addresses, no Microsoft
+// representation exists in this pool. Resolves the org's warmup_preferences
+// down to which half of that split a campaign should send to.
+//
+// gsuite ("Gmail") selected, google not -> gmail.com only
+// google selected, gsuite not -> custom domain only (excludes gmail.com)
+// both selected, neither selected (e.g. only ms365/outlook), or no
+// preferences at all -> null (no filter, full pool) — safe default so orgs
+// that haven't touched warmup preferences see no behavior change.
+const resolveProviderFilter = (selectedProviders, providerDistribution) => {
+  const selected = selectedProviders || [];
+  const distribution = providerDistribution || {};
+
+  const hasGsuite = selected.includes('gsuite') && (distribution.gsuite || 0) > 0;
+  const hasGoogle = selected.includes('google') && (distribution.google || 0) > 0;
+
+  if (hasGsuite && !hasGoogle) return 'gmail_only';
+  if (hasGoogle && !hasGsuite) return 'custom_domain_only';
+  return null;
+};
+
 // Supabase/PostgREST caps unpaginated selects at 1000 rows (db-max-rows) — page
 // through with .range() so campaigns actually reach every active mailbox, not
 // just the first 1000.
 const MAILBOX_PAGE_SIZE = 1000;
-const fetchAllActiveMailboxEmails = async () => {
+const fetchAllActiveMailboxEmails = async (providerFilter) => {
   const emails = [];
   let offset = 0;
 
   while (true) {
-    const { data, error } = await supabase
+    let query = supabase
       .from('auto_responder_mailboxes')
       .select('email')
-      .eq('is_active', true)
-      .range(offset, offset + MAILBOX_PAGE_SIZE - 1);
+      .eq('is_active', true);
+
+    if (providerFilter === 'gmail_only') {
+      query = query.ilike('email', '%@gmail.com');
+    } else if (providerFilter === 'custom_domain_only') {
+      query = query.not('email', 'ilike', '%@gmail.com');
+    }
+
+    const { data, error } = await query.range(offset, offset + MAILBOX_PAGE_SIZE - 1);
 
     if (error) throw new Error(`Failed to load recipients: ${error.message}`);
 
@@ -262,7 +292,7 @@ const fetchAllActiveMailboxEmails = async () => {
 // org+email) belong in this synchronous path; both the recipient fetch and
 // the actual sends run in the background via executeSesSend. See
 // migrations/003_ses_campaigns.sql for why.
-const prepareSesCampaign = async ({ orgId, fromEmail, templateId, templateData, subject, html, text } = {}) => {
+const prepareSesCampaign = async ({ orgId, fromEmail, templateId, templateData, subject, html, text, providerDistribution, selectedProviders } = {}) => {
   if (!orgId) throw new Error('orgId is required.');
   if (!fromEmail) throw new Error('fromEmail is required.');
   if (!templateId && !subject) throw new Error('subject is required when not using templateId.');
@@ -306,7 +336,9 @@ const prepareSesCampaign = async ({ orgId, fromEmail, templateId, templateData, 
   if (html) body.Html = { Data: html, Charset: 'UTF-8' };
   if (text) body.Text = { Data: text, Charset: 'UTF-8' };
 
-  return { orgId, fromEmail, subject, body, client };
+  const providerFilter = resolveProviderFilter(selectedProviders, providerDistribution);
+
+  return { orgId, fromEmail, subject, body, client, providerFilter };
 };
 
 // Runs the actual send prepared above: fetches the full recipient list (the
@@ -316,10 +348,10 @@ const prepareSesCampaign = async ({ orgId, fromEmail, templateId, templateData, 
 // an HTTP request. `onRecipientsResolved`, if given, is awaited with the
 // recipient count as soon as the list is known, before sending starts, so
 // callers can persist it without waiting for the whole send to finish.
-const executeSesSend = async ({ orgId, fromEmail, subject, body, client, onRecipientsResolved }) => {
+const executeSesSend = async ({ orgId, fromEmail, subject, body, client, onRecipientsResolved, providerFilter }) => {
   const startTime = Date.now();
 
-  const to = await fetchAllActiveMailboxEmails();
+  const to = await fetchAllActiveMailboxEmails(providerFilter);
   if (onRecipientsResolved) await onRecipientsResolved(to.length);
 
   let sent = 0;
@@ -383,6 +415,8 @@ const runCampaignSend = async (campaignRow) => {
     subject,
     html,
     text,
+    provider_distribution: providerDistribution,
+    selected_providers: selectedProviders,
   } = campaignRow;
 
   // prepareSesCampaign and the ses_campaign_sends insert live inside this
@@ -392,7 +426,7 @@ const runCampaignSend = async (campaignRow) => {
   // excludes 'sending' rows from every future tick).
   let sendRow;
   try {
-    const prepared = await prepareSesCampaign({ orgId, fromEmail, templateId, templateData, subject, html, text });
+    const prepared = await prepareSesCampaign({ orgId, fromEmail, templateId, templateData, subject, html, text, providerDistribution, selectedProviders });
 
     const { data, error: insertError } = await supabase
       .from('ses_campaign_sends')

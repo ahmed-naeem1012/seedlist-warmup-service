@@ -3,7 +3,7 @@ require('dotenv').config();
 require('./services/cronJobs');
 
 const http = require('http');
-const fs   = require('fs');
+const fs = require('fs');
 const path = require('path');
 
 const { sendSesTestCampaign, prepareSesCampaign, executeSesSend, runCampaignSend, TEST_EMAILS } = require('./services/sesEmailSender');
@@ -62,8 +62,8 @@ const server = http.createServer(async (req, res) => {
   // ── POST /api/ses/send-test-campaign ──────────────────────────────────────
   if (req.method === 'POST' && url === '/api/ses/send-test-campaign') {
     try {
-      const body      = await parseBody(req);
-      const subject   = (body.subject || '').trim() || `SES Test Campaign — ${new Date().toISOString()}`;
+      const body = await parseBody(req);
+      const subject = (body.subject || '').trim() || `SES Test Campaign — ${new Date().toISOString()}`;
       const fromEmail = body.fromEmail || process.env.SES_FROM_EMAIL;
 
       if (!fromEmail) {
@@ -419,11 +419,11 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && url === '/api/ses/send-campaign') {
     try {
       const body = await parseBody(req);
-      const { orgId, fromEmail, templateId, templateName, templateData, subject, html, text } = body;
+      const { orgId, fromEmail, templateId, templateName, templateData, subject, html, text, providerDistribution, selectedProviders } = body;
 
       console.log(`\n[SES CAMPAIGN] org=${orgId} from=${fromEmail} templateId=${templateId || '-'} subject="${subject || ''}"`);
 
-      const prepared = await prepareSesCampaign({ orgId, fromEmail, templateId, templateData, subject, html, text });
+      const prepared = await prepareSesCampaign({ orgId, fromEmail, templateId, templateData, subject, html, text, providerDistribution, selectedProviders });
 
       let campaign;
 
@@ -460,6 +460,8 @@ const server = http.createServer(async (req, res) => {
               html: html || null,
               text: text || null,
               last_run_at: new Date().toISOString(),
+              provider_distribution: providerDistribution || null,
+              selected_providers: selectedProviders || null,
             })
             .eq('id', existing.id)
             .select('*')
@@ -485,6 +487,8 @@ const server = http.createServer(async (req, res) => {
             status: 'sending',
             is_active: true,
             last_run_at: new Date().toISOString(),
+            provider_distribution: providerDistribution || null,
+            selected_providers: selectedProviders || null,
           })
           .select('*')
           .single();
