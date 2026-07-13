@@ -145,7 +145,7 @@ async function resendDueSesCampaigns() {
 
 registerWarmerJob({ label: 'SES Recurring Campaigns', schedule: '0 * * * *', envFlag: 'SES_RECURRING_CAMPAIGN_WARMER', run: resendDueSesCampaigns });
 
-const { resolveOrgSesCredentials, getDomainVerificationStatus } = require('./sesDomainIdentity');
+const { getPlatformSesCredentials, getDomainVerificationStatus } = require('./sesDomainIdentity');
 
 // Dashboard's "Domains & DKIM" tab shows every ses_domains row as
 // 'pending' until this flips it — AWS itself only checks DNS for the CNAME
@@ -166,9 +166,10 @@ async function pollPendingSesDomainVerifications() {
 
   for (const row of pendingDomains) {
     try {
-      // Credentials are account-wide, but the region must be the one this
-      // identity was actually created in — see getDomainVerificationStatus.
-      const { accessKeyId, secretAccessKey } = await resolveOrgSesCredentials(row.org_id);
+      // Same platform account for every domain across every org — the
+      // region must still be the one this identity was actually created
+      // in, though (see getDomainVerificationStatus).
+      const { accessKeyId, secretAccessKey } = getPlatformSesCredentials();
       const status = await getDomainVerificationStatus({
         region: row.aws_region,
         accessKeyId,

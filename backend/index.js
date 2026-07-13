@@ -9,7 +9,7 @@ const path = require('path');
 const { sendSesTestCampaign, prepareSesCampaign, executeSesSend, runCampaignSend, TEST_EMAILS } = require('./services/sesEmailSender');
 const supabase = require('./services/supabaseClient');
 const { encrypt } = require('./utils/crypto');
-const { resolveOrgSesCredentials, createDomainIdentity } = require('./services/sesDomainIdentity');
+const { getPlatformSesCredentials, createDomainIdentity } = require('./services/sesDomainIdentity');
 const { validateAwsSesCredentials } = require('./services/sesCredentialValidator');
 
 const port = process.env.PORT || 3000;
@@ -241,9 +241,12 @@ const server = http.createServer(async (req, res) => {
 
   // ── POST /api/domains ──────────────────────────────────────────────────────
   // Adds a sending domain for DKIM verification. Calls real AWS SESv2
-  // CreateEmailIdentity (services/sesDomainIdentity.js) using the org's
-  // stored ses_integrations credentials — the 3 CNAME records saved here
-  // are the actual tokens AWS returns, not locally generated placeholders.
+  // CreateEmailIdentity (services/sesDomainIdentity.js) using MAXIFY'S OWN
+  // platform AWS account (AWS_ACCESS_KEY_ID/SECRET/REGION in .env) — never
+  // anything from the customer's ses_integrations row. The customer's
+  // domain gets whitelisted against our SES account; they add the CNAME
+  // records to their own DNS, and we send on their behalf afterward. This
+  // has zero dependency on whether the org has any SES Credentials saved.
   if (req.method === 'POST' && url === '/api/domains') {
     try {
       const body = await parseBody(req);
@@ -271,9 +274,9 @@ const server = http.createServer(async (req, res) => {
 
       let credentials;
       try {
-        credentials = await resolveOrgSesCredentials(orgId);
+        credentials = getPlatformSesCredentials();
       } catch (err) {
-        return json(res, 400, { success: false, error: err.message });
+        return json(res, 500, { success: false, error: err.message });
       }
 
       let tokens;
@@ -334,11 +337,12 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── POST /api/domains/:id/senders ──────────────────────────────────────────
-  // Adds a "From" sender at a verified domain, reusing the org's existing
-  // active ses_integrations credentials (copied as-is, ciphertext to
-  // ciphertext — never decrypted here) so the user never re-enters AWS keys
-  // just to add another sender address. Lands in ses_integrations, the same
-  // table the campaigns tab's "Send from" dropdown already reads from.
+  // Adds a "From" sender at a verified domain. Lands in ses_integrations
+  // (same table the campaigns tab's "Send from" dropdown reads) but backed
+  // by MAXIFY'S OWN platform AWS credentials — never anything copied from
+  // the customer's own ses_integrations rows. This has zero dependency on
+  // the "SES Credentials" tab; a domain-verified sender needs no bring-
+  // your-own-AWS integration to exist for the org at all.
   if (req.method === 'POST' && url.startsWith('/api/domains/') && url.endsWith('/senders')) {
     try {
       const id = url.slice('/api/domains/'.length, url.length - '/senders'.length);
@@ -368,18 +372,11 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { success: false, error: `Sender email must be at ${domainRow.domain}.` });
       }
 
-      const { data: sourceIntegration, error: sourceError } = await supabase
-        .from('ses_integrations')
-        .select('aws_region, aws_access_key_id_enc, aws_secret_access_key_enc')
-        .eq('org_id', orgId)
-        .eq('is_active', true)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (sourceError) return json(res, 500, { success: false, error: sourceError.message });
-      if (!sourceIntegration) {
-        return json(res, 400, { success: false, error: 'No active AWS SES integration found for this organization. Add your AWS SES credentials first.' });
+      let platformCredentials;
+      try {
+        platformCredentials = getPlatformSesCredentials();
+      } catch (err) {
+        return json(res, 500, { success: false, error: err.message });
       }
 
       const { data, error } = await supabase
@@ -387,9 +384,9 @@ const server = http.createServer(async (req, res) => {
         .upsert({
           org_id: orgId,
           from_email: fromEmail,
-          aws_region: sourceIntegration.aws_region,
-          aws_access_key_id_enc: sourceIntegration.aws_access_key_id_enc,
-          aws_secret_access_key_enc: sourceIntegration.aws_secret_access_key_enc,
+          aws_region: platformCredentials.region,
+          aws_access_key_id_enc: encrypt(platformCredentials.accessKeyId),
+          aws_secret_access_key_enc: encrypt(platformCredentials.secretAccessKey),
           is_active: true,
         }, { onConflict: 'org_id,from_email' })
         .select('id, from_email, aws_region, is_active, created_at, updated_at')

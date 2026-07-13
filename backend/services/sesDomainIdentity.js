@@ -1,32 +1,28 @@
 const { SESv2Client, CreateEmailIdentityCommand, GetEmailIdentityCommand } = require('@aws-sdk/client-sesv2');
-const supabase = require('./supabaseClient');
-const { decrypt } = require('../utils/crypto');
 
-// Picks which of the org's AWS credentials to create/verify domain
-// identities against. Orgs typically have one AWS account behind their SES
-// integrations, so "most recently added active integration" is the simple,
-// correct default — the Domains & DKIM tab has no per-domain credential
-// picker (yet; would need one if an org ever runs multiple AWS accounts).
-async function resolveOrgSesCredentials(orgId) {
-  const { data: integration, error } = await supabase
-    .from('ses_integrations')
-    .select('aws_region, aws_access_key_id_enc, aws_secret_access_key_enc')
-    .eq('org_id', orgId)
-    .eq('is_active', true)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+// Domain verification is NOT per-org — customers never provide their own AWS
+// keys for this. A customer's domain gets whitelisted against Maxify's own
+// AWS SES account: we create the identity here, hand them the DKIM CNAME
+// records, they add those to their own DNS, and once AWS confirms them,
+// *our* account is authorized to send as their domain. Sending later goes
+// out through this same platform account on their behalf.
+//
+// This intentionally has zero relationship to the "SES Credentials" tab
+// (ses_integrations) — that's a separate, optional bring-your-own-AWS path
+// for customers who want to connect their own account for warmup. Domains &
+// DKIM must work with no row in that table at all.
+function getPlatformSesCredentials() {
+  const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+  const region = process.env.AWS_REGION;
 
-  if (error) throw new Error(`Failed to look up SES credentials: ${error.message}`);
-  if (!integration) {
-    throw new Error('No active AWS SES integration found for this organization. Add your AWS SES credentials first.');
+  if (!accessKeyId || !secretAccessKey || !region) {
+    throw new Error(
+      "Maxify's AWS SES is not configured on this server. Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_REGION in .env."
+    );
   }
 
-  return {
-    region: integration.aws_region,
-    accessKeyId: decrypt(integration.aws_access_key_id_enc),
-    secretAccessKey: decrypt(integration.aws_secret_access_key_enc),
-  };
+  return { accessKeyId, secretAccessKey, region };
 }
 
 // Creates the SES email identity for `domain` in AWS and returns its real
@@ -64,12 +60,11 @@ async function createDomainIdentity({ region, accessKeyId, secretAccessKey, doma
 }
 
 // Checks AWS for the current DKIM verification state of a previously
-// created domain identity. `region` must be the domain's own stored
-// aws_region (migrations/006_ses_domains.sql) — not necessarily the org's
-// most-recently-added integration's region — since SES identities are
-// per-region and querying the wrong one returns NotFoundException even
-// though the identity exists. accessKeyId/secretAccessKey are account-wide
-// though, so any of the org's active integrations can supply those.
+// created domain identity. `region` should be the domain's own stored
+// aws_region (migrations/006_ses_domains.sql) — SES identities are
+// per-region, and since it's always this same platform account, that's
+// just process.env.AWS_REGION at the time the domain was created (kept
+// per-row in case the platform's region config ever changes later).
 //
 // Returns 'verified' once AWS confirms the CNAME records, 'failed' if AWS
 // gave up on them, or 'pending' if there's nothing new yet (keep polling).
@@ -84,4 +79,4 @@ async function getDomainVerificationStatus({ region, accessKeyId, secretAccessKe
   return 'pending';
 }
 
-module.exports = { resolveOrgSesCredentials, createDomainIdentity, getDomainVerificationStatus };
+module.exports = { getPlatformSesCredentials, createDomainIdentity, getDomainVerificationStatus };
