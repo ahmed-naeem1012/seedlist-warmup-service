@@ -27,8 +27,11 @@ const { engageSeedlistSes } = require('../scripts/seedlist engagments/seedlist e
 
 const STUCK_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 
-// Env-flag gate + re-entrancy lock + try/catch/finally, shared across all 10
-// warmer jobs.
+// Re-entrancy lock + try/catch/finally, shared across all warmer jobs.
+// envFlag is optional: pass it only when this exact job also runs in the
+// main backend (maxify-proj) and the two services need to coordinate which
+// one owns it, to avoid double-processing the same mailboxes/emails. Jobs
+// that are unique to this service don't need one — they just run.
 //
 // IMPORTANT: a stuck job is never force-released here. Force-releasing used to
 // let the next cron tick start a brand-new overlapping run on top of a job
@@ -43,7 +46,7 @@ function registerWarmerJob({ label, schedule, envFlag, run }) {
   let alertedStuck = false;
 
   cron.schedule(schedule, async () => {
-    if (process.env[envFlag] !== 'true') return;
+    if (envFlag && process.env[envFlag] !== 'true') return;
 
     if (isRunning) {
       const runningForMs = startTime ? Date.now() - startTime : 0;
@@ -143,7 +146,10 @@ async function resendDueSesCampaigns() {
   return { checked: dueCampaigns.length, started };
 }
 
-registerWarmerJob({ label: 'SES Recurring Campaigns', schedule: '0 * * * *', envFlag: 'SES_RECURRING_CAMPAIGN_WARMER', run: resendDueSesCampaigns });
+// No envFlag: this job is unique to this service (doesn't exist in
+// maxify-proj), so there's no other instance it could double-process
+// against — it should just always run.
+registerWarmerJob({ label: 'SES Recurring Campaigns', schedule: '0 * * * *', run: resendDueSesCampaigns });
 
 const { getPlatformSesCredentials, getDomainVerificationStatus } = require('./sesDomainIdentity');
 
