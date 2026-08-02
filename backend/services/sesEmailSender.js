@@ -131,6 +131,38 @@ const createConcurrencyLimiter = (max) => {
   };
 };
 
+// Hard cap on SES send calls per second. SEND_CONCURRENCY above only limits
+// how many sends are in flight at once — it doesn't stop new ones from
+// starting faster than 1/second once earlier sends finish. This is a
+// separate token-bucket limiter for that, shared by every send path below
+// (test campaigns, real campaigns, recurring cron resends) so a manual send
+// and a resend firing at the same time still can't push the combined rate
+// past this.
+const SEND_RATE_PER_SECOND = parseInt(process.env.SES_SEND_RATE_PER_SECOND || '11');
+
+const createRateLimiter = (maxPerSecond) => {
+  let tokens = maxPerSecond;
+  const queue = [];
+
+  setInterval(() => {
+    tokens = maxPerSecond;
+    while (tokens > 0 && queue.length > 0) {
+      tokens--;
+      queue.shift()();
+    }
+  }, 1000).unref();
+
+  return () => {
+    if (tokens > 0) {
+      tokens--;
+      return Promise.resolve();
+    }
+    return new Promise(resolve => queue.push(resolve));
+  };
+};
+
+const acquireSendSlot = createRateLimiter(SEND_RATE_PER_SECOND);
+
 const buildEmailHtml = (subject, clickUrl) => `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
@@ -203,6 +235,7 @@ const sendSesTestCampaign = async ({ subject, fromEmail, recipients, clickUrl } 
     to.map(email =>
       limit(async () => {
         try {
+          await acquireSendSlot();
           await client.send(new SendEmailCommand({
             Source: from,
             Destination: { ToAddresses: [email] },
@@ -374,6 +407,7 @@ const executeSesSend = async ({ orgId, fromEmail, subject, body, client, onRecip
           if (body.Html) personalizedBody.Html = { ...body.Html, Data: renderHandlebars(body.Html.Data, vars) };
           if (body.Text) personalizedBody.Text = { ...body.Text, Data: renderHandlebars(body.Text.Data, vars) };
 
+          await acquireSendSlot();
           await client.send(new SendEmailCommand({
             Source: fromEmail,
             Destination: { ToAddresses: [email] },
