@@ -204,6 +204,34 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { success: true, integrations: data });
   }
 
+  // ── GET /api/integrations/ses/daily-sends?orgId=... ────────────────────────
+  // Sums real ses_campaign_sends rows for today per from_email, for the
+  // dashboard's "Custom Warmup" tab. There's no live per-day counter for SES
+  // (unlike sending_domain_mailboxes.emails_sent_today), so this is computed
+  // fresh each request from the campaign-send log instead.
+  if (req.method === 'GET' && url === '/api/integrations/ses/daily-sends') {
+    const orgId = getQuery(req).get('orgId');
+    if (!orgId) return json(res, 400, { success: false, error: 'orgId query param is required.' });
+
+    const startOfTodayUtc = new Date();
+    startOfTodayUtc.setUTCHours(0, 0, 0, 0);
+
+    const { data, error } = await supabase
+      .from('ses_campaign_sends')
+      .select('from_email, sent')
+      .eq('org_id', orgId)
+      .gte('sent_at', startOfTodayUtc.toISOString());
+
+    if (error) return json(res, 500, { success: false, error: error.message });
+
+    const sends = {};
+    for (const row of data || []) {
+      sends[row.from_email] = (sends[row.from_email] || 0) + row.sent;
+    }
+
+    return json(res, 200, { success: true, sends });
+  }
+
   // ── DELETE /api/integrations/ses/:id ───────────────────────────────────────
   if (req.method === 'DELETE' && url.startsWith('/api/integrations/ses/')) {
     const id = url.slice('/api/integrations/ses/'.length);
