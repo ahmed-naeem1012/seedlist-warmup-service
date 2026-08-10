@@ -1,16 +1,27 @@
-require('dotenv').config();
+require("dotenv").config();
 
-require('./services/cronJobs');
+require("./services/cronJobs");
 
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
 
-const { sendSesTestCampaign, prepareSesCampaign, executeSesSend, runCampaignSend, TEST_EMAILS } = require('./services/sesEmailSender');
-const supabase = require('./services/supabaseClient');
-const { encrypt } = require('./utils/crypto');
-const { getPlatformSesCredentials, createDomainIdentity } = require('./services/sesDomainIdentity');
-const { validateAwsSesCredentials } = require('./services/sesCredentialValidator');
+const {
+  sendSesTestCampaign,
+  prepareSesCampaign,
+  executeSesSend,
+  runCampaignSend,
+  TEST_EMAILS,
+} = require("./services/sesEmailSender");
+const supabase = require("./services/supabaseClient");
+const { encrypt } = require("./utils/crypto");
+const {
+  getPlatformSesCredentials,
+  createDomainIdentity,
+} = require("./services/sesDomainIdentity");
+const {
+  validateAwsSesCredentials,
+} = require("./services/sesCredentialValidator");
 
 const port = process.env.PORT || 3000;
 
@@ -18,115 +29,148 @@ const DOMAIN_REGEX = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i;
 
 const parseBody = (req) =>
   new Promise((resolve) => {
-    let raw = '';
-    req.on('data', chunk => { raw += chunk; });
-    req.on('end', () => {
-      try { resolve(JSON.parse(raw)); } catch { resolve({}); }
+    let raw = "";
+    req.on("data", (chunk) => {
+      raw += chunk;
+    });
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        resolve({});
+      }
     });
   });
 
 const json = (res, status, data) => {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(data));
 };
 
-const getQuery = (req) => new URL(req.url, 'http://internal').searchParams;
+const getQuery = (req) => new URL(req.url, "http://internal").searchParams;
 
 const server = http.createServer(async (req, res) => {
-  const url = req.url.split('?')[0];
+  const url = req.url.split("?")[0];
 
   // ── existing health check (unchanged) ────────────────────────────────────
-  if (url === '/health' || url === '/') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', service: 'seedlist-warmup-service' }));
+  if (url === "/health" || url === "/") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({ status: "ok", service: "seedlist-warmup-service" }),
+    );
     return;
   }
 
   // ── dashboard UI ──────────────────────────────────────────────────────────
-  if (req.method === 'GET' && url === '/dashboard') {
+  if (req.method === "GET" && url === "/dashboard") {
     try {
-      const html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
-      res.writeHead(200, { 'Content-Type': 'text/html' });
+      const html = fs.readFileSync(
+        path.join(__dirname, "public", "index.html"),
+        "utf8",
+      );
+      res.writeHead(200, { "Content-Type": "text/html" });
       res.end(html);
     } catch {
-      json(res, 500, { error: 'Dashboard file not found.' });
+      json(res, 500, { error: "Dashboard file not found." });
     }
     return;
   }
 
   // ── GET /api/ses/test-emails ──────────────────────────────────────────────
-  if (req.method === 'GET' && url === '/api/ses/test-emails') {
+  if (req.method === "GET" && url === "/api/ses/test-emails") {
     return json(res, 200, { emails: TEST_EMAILS, count: TEST_EMAILS.length });
   }
 
   // ── POST /api/ses/send-test-campaign ──────────────────────────────────────
-  if (req.method === 'POST' && url === '/api/ses/send-test-campaign') {
+  if (req.method === "POST" && url === "/api/ses/send-test-campaign") {
     try {
       const body = await parseBody(req);
-      const subject = (body.subject || '').trim() || `SES Test Campaign — ${new Date().toISOString()}`;
+      const subject =
+        (body.subject || "").trim() ||
+        `SES Test Campaign — ${new Date().toISOString()}`;
       const fromEmail = body.fromEmail || process.env.SES_FROM_EMAIL;
 
       if (!fromEmail) {
         return json(res, 400, {
           success: false,
-          error: 'SES_FROM_EMAIL is not configured. Add it to .env or pass fromEmail in the request body.',
+          error:
+            "SES_FROM_EMAIL is not configured. Add it to .env or pass fromEmail in the request body.",
         });
       }
-      if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY) {
+      if (
+        !process.env.AWS_ACCESS_KEY_ID ||
+        !process.env.AWS_SECRET_ACCESS_KEY
+      ) {
         return json(res, 400, {
           success: false,
-          error: 'AWS credentials are not configured. Add AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to .env.',
+          error:
+            "AWS credentials are not configured. Add AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to .env.",
         });
       }
 
       console.log(`\n[SES SENDER] Campaign: "${subject}"`);
-      console.log(`[SES SENDER] From: ${fromEmail} → ${TEST_EMAILS.length} recipients\n`);
+      console.log(
+        `[SES SENDER] From: ${fromEmail} → ${TEST_EMAILS.length} recipients\n`,
+      );
 
       const result = await sendSesTestCampaign({ subject, fromEmail });
 
-      console.log(`\n[SES SENDER] Done — Sent: ${result.sent} | Failed: ${result.failed} | ${result.duration}s\n`);
+      console.log(
+        `\n[SES SENDER] Done — Sent: ${result.sent} | Failed: ${result.failed} | ${result.duration}s\n`,
+      );
 
       return json(res, 200, { success: true, ...result });
     } catch (err) {
-      console.error('[SES SENDER] Error:', err.message);
+      console.error("[SES SENDER] Error:", err.message);
       return json(res, 500, { success: false, error: err.message });
     }
   }
 
   // ── POST /api/integrations/ses ────────────────────────────────────────────
-  if (req.method === 'POST' && url === '/api/integrations/ses') {
+  if (req.method === "POST" && url === "/api/integrations/ses") {
     try {
       const body = await parseBody(req);
       const { orgId, fromEmail, awsAccessKeyId, awsSecretAccessKey } = body;
-      const awsRegion = body.awsRegion || 'us-east-1';
+      const awsRegion = body.awsRegion || "us-east-1";
 
       if (!orgId || !fromEmail || !awsAccessKeyId || !awsSecretAccessKey) {
         return json(res, 400, {
           success: false,
-          error: 'orgId, fromEmail, awsAccessKeyId and awsSecretAccessKey are all required.',
+          error:
+            "orgId, fromEmail, awsAccessKeyId and awsSecretAccessKey are all required.",
         });
       }
 
       try {
-        await validateAwsSesCredentials({ accessKeyId: awsAccessKeyId, secretAccessKey: awsSecretAccessKey, region: awsRegion });
+        await validateAwsSesCredentials({
+          accessKeyId: awsAccessKeyId,
+          secretAccessKey: awsSecretAccessKey,
+          region: awsRegion,
+        });
       } catch (validationErr) {
         return json(res, 400, { success: false, error: validationErr.message });
       }
 
       const { data, error } = await supabase
-        .from('ses_integrations')
-        .upsert({
-          org_id: orgId,
-          from_email: fromEmail,
-          aws_region: awsRegion,
-          aws_access_key_id_enc: encrypt(awsAccessKeyId),
-          aws_secret_access_key_enc: encrypt(awsSecretAccessKey),
-          is_active: true,
-        }, { onConflict: 'org_id,from_email' })
-        .select('id, org_id, from_email, aws_region, is_active, created_at, updated_at')
+        .from("ses_integrations")
+        .upsert(
+          {
+            org_id: orgId,
+            from_email: fromEmail,
+            aws_region: awsRegion,
+            aws_access_key_id_enc: encrypt(awsAccessKeyId),
+            aws_secret_access_key_enc: encrypt(awsSecretAccessKey),
+            is_active: true,
+          },
+          { onConflict: "org_id,from_email" },
+        )
+        .select(
+          "id, org_id, from_email, aws_region, is_active, created_at, updated_at",
+        )
         .single();
 
-      if (error) return json(res, 500, { success: false, error: error.message });
+      if (error)
+        return json(res, 500, { success: false, error: error.message });
       return json(res, 200, { success: true, integration: data });
     } catch (err) {
       return json(res, 500, { success: false, error: err.message });
@@ -134,23 +178,40 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── POST /api/integrations/ses/bulk ───────────────────────────────────────
-  if (req.method === 'POST' && url === '/api/integrations/ses/bulk') {
+  if (req.method === "POST" && url === "/api/integrations/ses/bulk") {
     try {
       const body = await parseBody(req);
-      const { orgId, awsRegion, awsAccessKeyId, awsSecretAccessKey, fromEmails } = body;
+      const {
+        orgId,
+        awsRegion,
+        awsAccessKeyId,
+        awsSecretAccessKey,
+        fromEmails,
+      } = body;
 
-      if (!orgId || !awsRegion || !awsAccessKeyId || !awsSecretAccessKey || !Array.isArray(fromEmails) || fromEmails.length === 0) {
+      if (
+        !orgId ||
+        !awsRegion ||
+        !awsAccessKeyId ||
+        !awsSecretAccessKey ||
+        !Array.isArray(fromEmails) ||
+        fromEmails.length === 0
+      ) {
         return json(res, 400, {
           success: false,
-          error: 'orgId, awsRegion, awsAccessKeyId, awsSecretAccessKey and a non-empty fromEmails array are all required.',
+          error:
+            "orgId, awsRegion, awsAccessKeyId, awsSecretAccessKey and a non-empty fromEmails array are all required.",
         });
       }
 
-      if (!fromEmails.every(e => typeof e === 'string' && e.trim())) {
-        return json(res, 400, { success: false, error: 'fromEmails must be an array of non-empty strings.' });
+      if (!fromEmails.every((e) => typeof e === "string" && e.trim())) {
+        return json(res, 400, {
+          success: false,
+          error: "fromEmails must be an array of non-empty strings.",
+        });
       }
 
-      const uniqueFromEmails = [...new Set(fromEmails.map(e => e.trim()))];
+      const uniqueFromEmails = [...new Set(fromEmails.map((e) => e.trim()))];
 
       const MAX_BULK_EMAILS = 100;
       if (uniqueFromEmails.length > MAX_BULK_EMAILS) {
@@ -163,12 +224,16 @@ const server = http.createServer(async (req, res) => {
       try {
         // One key pair is shared across every row in the batch — validate it
         // once up front rather than per-row against the same credentials.
-        await validateAwsSesCredentials({ accessKeyId: awsAccessKeyId, secretAccessKey: awsSecretAccessKey, region: awsRegion });
+        await validateAwsSesCredentials({
+          accessKeyId: awsAccessKeyId,
+          secretAccessKey: awsSecretAccessKey,
+          region: awsRegion,
+        });
       } catch (validationErr) {
         return json(res, 400, { success: false, error: validationErr.message });
       }
 
-      const rows = uniqueFromEmails.map(fromEmail => ({
+      const rows = uniqueFromEmails.map((fromEmail) => ({
         org_id: orgId,
         from_email: fromEmail,
         aws_region: awsRegion,
@@ -178,11 +243,14 @@ const server = http.createServer(async (req, res) => {
       }));
 
       const { data, error } = await supabase
-        .from('ses_integrations')
-        .upsert(rows, { onConflict: 'org_id,from_email' })
-        .select('id, org_id, from_email, aws_region, is_active, created_at, updated_at');
+        .from("ses_integrations")
+        .upsert(rows, { onConflict: "org_id,from_email" })
+        .select(
+          "id, org_id, from_email, aws_region, is_active, created_at, updated_at",
+        );
 
-      if (error) return json(res, 500, { success: false, error: error.message });
+      if (error)
+        return json(res, 500, { success: false, error: error.message });
       return json(res, 200, { success: true, integrations: data });
     } catch (err) {
       return json(res, 500, { success: false, error: err.message });
@@ -190,15 +258,21 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── GET /api/integrations/ses?orgId=... ───────────────────────────────────
-  if (req.method === 'GET' && url === '/api/integrations/ses') {
-    const orgId = getQuery(req).get('orgId');
-    if (!orgId) return json(res, 400, { success: false, error: 'orgId query param is required.' });
+  if (req.method === "GET" && url === "/api/integrations/ses") {
+    const orgId = getQuery(req).get("orgId");
+    if (!orgId)
+      return json(res, 400, {
+        success: false,
+        error: "orgId query param is required.",
+      });
 
     const { data, error } = await supabase
-      .from('ses_integrations')
-      .select('id, from_email, aws_region, is_active, last_error, created_at, updated_at')
-      .eq('org_id', orgId)
-      .order('created_at', { ascending: true });
+      .from("ses_integrations")
+      .select(
+        "id, from_email, aws_region, is_active, last_error, created_at, updated_at",
+      )
+      .eq("org_id", orgId)
+      .order("created_at", { ascending: true });
 
     if (error) return json(res, 500, { success: false, error: error.message });
     return json(res, 200, { success: true, integrations: data });
@@ -209,18 +283,22 @@ const server = http.createServer(async (req, res) => {
   // dashboard's "Custom Warmup" tab. There's no live per-day counter for SES
   // (unlike sending_domain_mailboxes.emails_sent_today), so this is computed
   // fresh each request from the campaign-send log instead.
-  if (req.method === 'GET' && url === '/api/integrations/ses/daily-sends') {
-    const orgId = getQuery(req).get('orgId');
-    if (!orgId) return json(res, 400, { success: false, error: 'orgId query param is required.' });
+  if (req.method === "GET" && url === "/api/integrations/ses/daily-sends") {
+    const orgId = getQuery(req).get("orgId");
+    if (!orgId)
+      return json(res, 400, {
+        success: false,
+        error: "orgId query param is required.",
+      });
 
     const startOfTodayUtc = new Date();
     startOfTodayUtc.setUTCHours(0, 0, 0, 0);
 
     const { data, error } = await supabase
-      .from('ses_campaign_sends')
-      .select('from_email, sent')
-      .eq('org_id', orgId)
-      .gte('sent_at', startOfTodayUtc.toISOString());
+      .from("ses_campaign_sends")
+      .select("from_email, sent")
+      .eq("org_id", orgId)
+      .gte("sent_at", startOfTodayUtc.toISOString());
 
     if (error) return json(res, 500, { success: false, error: error.message });
 
@@ -233,15 +311,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── DELETE /api/integrations/ses/:id ───────────────────────────────────────
-  if (req.method === 'DELETE' && url.startsWith('/api/integrations/ses/')) {
-    const id = url.slice('/api/integrations/ses/'.length);
-    if (!id) return json(res, 400, { success: false, error: 'Integration id is required.' });
+  if (req.method === "DELETE" && url.startsWith("/api/integrations/ses/")) {
+    const id = url.slice("/api/integrations/ses/".length);
+    if (!id)
+      return json(res, 400, {
+        success: false,
+        error: "Integration id is required.",
+      });
 
     const { data: integration, error } = await supabase
-      .from('ses_integrations')
+      .from("ses_integrations")
       .update({ is_active: false })
-      .eq('id', id)
-      .select('org_id, from_email')
+      .eq("id", id)
+      .select("org_id, from_email")
       .single();
 
     if (error) return json(res, 500, { success: false, error: error.message });
@@ -254,17 +336,77 @@ const server = http.createServer(async (req, res) => {
     // daily" since that badge reads straight off is_active.
     if (integration) {
       const { error: campaignsError } = await supabase
-        .from('ses_campaigns')
+        .from("ses_campaigns")
         .update({ is_active: false })
-        .eq('org_id', integration.org_id)
-        .eq('from_email', integration.from_email);
+        .eq("org_id", integration.org_id)
+        .eq("from_email", integration.from_email);
 
       if (campaignsError) {
-        console.error('[DELETE integration] Failed to pause associated campaigns:', campaignsError.message);
+        console.error(
+          "[DELETE integration] Failed to pause associated campaigns:",
+          campaignsError.message,
+        );
       }
     }
 
     return json(res, 200, { success: true });
+  }
+
+  // ── PATCH /api/integrations/ses/:id/status ──────────────────────────────────
+  // Bidirectional pause/resume toggle for the dashboard's Custom Warmup tab,
+  // distinct from DELETE above (which is a one-way "remove"). Pausing also
+  // stops the recurring resend cron for this sender, same as DELETE does.
+  // Resuming does NOT auto-resume ses_campaigns - that's a separate,
+  // deliberate action via POST /api/ses/campaigns/:id/resume.
+  if (
+    req.method === "PATCH" &&
+    url.startsWith("/api/integrations/ses/") &&
+    url.endsWith("/status")
+  ) {
+    const id = url.slice(
+      "/api/integrations/ses/".length,
+      url.length - "/status".length,
+    );
+    if (!id)
+      return json(res, 400, {
+        success: false,
+        error: "Integration id is required.",
+      });
+
+    const body = await parseBody(req);
+    const { isActive } = body;
+    if (typeof isActive !== "boolean") {
+      return json(res, 400, {
+        success: false,
+        error: "isActive (boolean) is required.",
+      });
+    }
+
+    const { data: integration, error } = await supabase
+      .from("ses_integrations")
+      .update({ is_active: isActive })
+      .eq("id", id)
+      .select("org_id, from_email, is_active")
+      .single();
+
+    if (error) return json(res, 500, { success: false, error: error.message });
+
+    if (integration && isActive === false) {
+      const { error: campaignsError } = await supabase
+        .from("ses_campaigns")
+        .update({ is_active: false })
+        .eq("org_id", integration.org_id)
+        .eq("from_email", integration.from_email);
+
+      if (campaignsError) {
+        console.error(
+          "[PATCH integration status] Failed to pause associated campaigns:",
+          campaignsError.message,
+        );
+      }
+    }
+
+    return json(res, 200, { success: true, integration });
   }
 
   // ── POST /api/domains ──────────────────────────────────────────────────────
@@ -275,29 +417,39 @@ const server = http.createServer(async (req, res) => {
   // domain gets whitelisted against our SES account; they add the CNAME
   // records to their own DNS, and we send on their behalf afterward. This
   // has zero dependency on whether the org has any SES Credentials saved.
-  if (req.method === 'POST' && url === '/api/domains') {
+  if (req.method === "POST" && url === "/api/domains") {
     try {
       const body = await parseBody(req);
       const { orgId } = body;
-      const domain = (body.domain || '').trim().toLowerCase();
+      const domain = (body.domain || "").trim().toLowerCase();
 
       if (!orgId || !domain) {
-        return json(res, 400, { success: false, error: 'orgId and domain are required.' });
+        return json(res, 400, {
+          success: false,
+          error: "orgId and domain are required.",
+        });
       }
       if (!DOMAIN_REGEX.test(domain)) {
-        return json(res, 400, { success: false, error: 'Enter a valid domain, e.g. yourdomain.com.' });
+        return json(res, 400, {
+          success: false,
+          error: "Enter a valid domain, e.g. yourdomain.com.",
+        });
       }
 
       const { data: existing, error: lookupError } = await supabase
-        .from('ses_domains')
-        .select('id')
-        .eq('org_id', orgId)
-        .eq('domain', domain)
+        .from("ses_domains")
+        .select("id")
+        .eq("org_id", orgId)
+        .eq("domain", domain)
         .maybeSingle();
 
-      if (lookupError) return json(res, 500, { success: false, error: lookupError.message });
+      if (lookupError)
+        return json(res, 500, { success: false, error: lookupError.message });
       if (existing) {
-        return json(res, 409, { success: false, error: 'This domain has already been added.' });
+        return json(res, 409, {
+          success: false,
+          error: "This domain has already been added.",
+        });
       }
 
       let credentials;
@@ -311,7 +463,10 @@ const server = http.createServer(async (req, res) => {
       try {
         tokens = await createDomainIdentity({ ...credentials, domain });
       } catch (err) {
-        return json(res, 502, { success: false, error: `AWS SES rejected this domain: ${err.message}` });
+        return json(res, 502, {
+          success: false,
+          error: `AWS SES rejected this domain: ${err.message}`,
+        });
       }
 
       const cnameRecords = tokens.map((token) => ({
@@ -320,12 +475,18 @@ const server = http.createServer(async (req, res) => {
       }));
 
       const { data, error } = await supabase
-        .from('ses_domains')
-        .insert({ org_id: orgId, domain, cname_records: cnameRecords, aws_region: credentials.region })
-        .select('id, domain, cname_records, status, created_at, updated_at')
+        .from("ses_domains")
+        .insert({
+          org_id: orgId,
+          domain,
+          cname_records: cnameRecords,
+          aws_region: credentials.region,
+        })
+        .select("id, domain, cname_records, status, created_at, updated_at")
         .single();
 
-      if (error) return json(res, 500, { success: false, error: error.message });
+      if (error)
+        return json(res, 500, { success: false, error: error.message });
       return json(res, 200, { success: true, domain: data });
     } catch (err) {
       return json(res, 500, { success: false, error: err.message });
@@ -333,32 +494,44 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── GET /api/domains?orgId=... ─────────────────────────────────────────────
-  if (req.method === 'GET' && url === '/api/domains') {
-    const orgId = getQuery(req).get('orgId');
-    if (!orgId) return json(res, 400, { success: false, error: 'orgId query param is required.' });
+  if (req.method === "GET" && url === "/api/domains") {
+    const orgId = getQuery(req).get("orgId");
+    if (!orgId)
+      return json(res, 400, {
+        success: false,
+        error: "orgId query param is required.",
+      });
 
     const { data, error } = await supabase
-      .from('ses_domains')
-      .select('id, domain, cname_records, status, created_at, updated_at')
-      .eq('org_id', orgId)
-      .order('created_at', { ascending: false });
+      .from("ses_domains")
+      .select("id, domain, cname_records, status, created_at, updated_at")
+      .eq("org_id", orgId)
+      .order("created_at", { ascending: false });
 
     if (error) return json(res, 500, { success: false, error: error.message });
     return json(res, 200, { success: true, domains: data });
   }
 
   // ── DELETE /api/domains/:id?orgId=... ──────────────────────────────────────
-  if (req.method === 'DELETE' && url.startsWith('/api/domains/')) {
-    const id = url.slice('/api/domains/'.length);
-    const orgId = getQuery(req).get('orgId');
-    if (!id) return json(res, 400, { success: false, error: 'Domain id is required.' });
-    if (!orgId) return json(res, 400, { success: false, error: 'orgId query param is required.' });
+  if (req.method === "DELETE" && url.startsWith("/api/domains/")) {
+    const id = url.slice("/api/domains/".length);
+    const orgId = getQuery(req).get("orgId");
+    if (!id)
+      return json(res, 400, {
+        success: false,
+        error: "Domain id is required.",
+      });
+    if (!orgId)
+      return json(res, 400, {
+        success: false,
+        error: "orgId query param is required.",
+      });
 
     const { error } = await supabase
-      .from('ses_domains')
+      .from("ses_domains")
       .delete()
-      .eq('id', id)
-      .eq('org_id', orgId);
+      .eq("id", id)
+      .eq("org_id", orgId);
 
     if (error) return json(res, 500, { success: false, error: error.message });
     return json(res, 200, { success: true });
@@ -371,33 +544,51 @@ const server = http.createServer(async (req, res) => {
   // the customer's own ses_integrations rows. This has zero dependency on
   // the "SES Credentials" tab; a domain-verified sender needs no bring-
   // your-own-AWS integration to exist for the org at all.
-  if (req.method === 'POST' && url.startsWith('/api/domains/') && url.endsWith('/senders')) {
+  if (
+    req.method === "POST" &&
+    url.startsWith("/api/domains/") &&
+    url.endsWith("/senders")
+  ) {
     try {
-      const id = url.slice('/api/domains/'.length, url.length - '/senders'.length);
+      const id = url.slice(
+        "/api/domains/".length,
+        url.length - "/senders".length,
+      );
       const body = await parseBody(req);
       const { orgId } = body;
-      const fromEmail = (body.fromEmail || '').trim();
+      const fromEmail = (body.fromEmail || "").trim();
 
       if (!id || !orgId || !fromEmail) {
-        return json(res, 400, { success: false, error: 'orgId, domain id and fromEmail are required.' });
+        return json(res, 400, {
+          success: false,
+          error: "orgId, domain id and fromEmail are required.",
+        });
       }
 
       const { data: domainRow, error: domainError } = await supabase
-        .from('ses_domains')
-        .select('domain, status')
-        .eq('id', id)
-        .eq('org_id', orgId)
+        .from("ses_domains")
+        .select("domain, status")
+        .eq("id", id)
+        .eq("org_id", orgId)
         .maybeSingle();
 
-      if (domainError) return json(res, 500, { success: false, error: domainError.message });
-      if (!domainRow) return json(res, 404, { success: false, error: 'Domain not found.' });
-      if (domainRow.status !== 'verified') {
-        return json(res, 400, { success: false, error: 'This domain must be verified before adding senders.' });
+      if (domainError)
+        return json(res, 500, { success: false, error: domainError.message });
+      if (!domainRow)
+        return json(res, 404, { success: false, error: "Domain not found." });
+      if (domainRow.status !== "verified") {
+        return json(res, 400, {
+          success: false,
+          error: "This domain must be verified before adding senders.",
+        });
       }
 
-      const emailDomain = fromEmail.split('@')[1]?.toLowerCase();
+      const emailDomain = fromEmail.split("@")[1]?.toLowerCase();
       if (emailDomain !== domainRow.domain) {
-        return json(res, 400, { success: false, error: `Sender email must be at ${domainRow.domain}.` });
+        return json(res, 400, {
+          success: false,
+          error: `Sender email must be at ${domainRow.domain}.`,
+        });
       }
 
       let platformCredentials;
@@ -408,19 +599,25 @@ const server = http.createServer(async (req, res) => {
       }
 
       const { data, error } = await supabase
-        .from('ses_integrations')
-        .upsert({
-          org_id: orgId,
-          from_email: fromEmail,
-          aws_region: platformCredentials.region,
-          aws_access_key_id_enc: encrypt(platformCredentials.accessKeyId),
-          aws_secret_access_key_enc: encrypt(platformCredentials.secretAccessKey),
-          is_active: true,
-        }, { onConflict: 'org_id,from_email' })
-        .select('id, from_email, aws_region, is_active, created_at, updated_at')
+        .from("ses_integrations")
+        .upsert(
+          {
+            org_id: orgId,
+            from_email: fromEmail,
+            aws_region: platformCredentials.region,
+            aws_access_key_id_enc: encrypt(platformCredentials.accessKeyId),
+            aws_secret_access_key_enc: encrypt(
+              platformCredentials.secretAccessKey,
+            ),
+            is_active: true,
+          },
+          { onConflict: "org_id,from_email" },
+        )
+        .select("id, from_email, aws_region, is_active, created_at, updated_at")
         .single();
 
-      if (error) return json(res, 500, { success: false, error: error.message });
+      if (error)
+        return json(res, 500, { success: false, error: error.message });
       return json(res, 200, { success: true, integration: data });
     } catch (err) {
       return json(res, 500, { success: false, error: err.message });
@@ -441,14 +638,37 @@ const server = http.createServer(async (req, res) => {
   // services/cronJobs.js resends against this same row via
   // runCampaignSend(), it never inserts a new ses_campaigns row. See
   // migrations/005_ses_campaigns_recurring.sql.
-  if (req.method === 'POST' && url === '/api/ses/send-campaign') {
+  if (req.method === "POST" && url === "/api/ses/send-campaign") {
     try {
       const body = await parseBody(req);
-      const { orgId, fromEmail, templateId, templateName, templateData, subject, html, text, providerDistribution, selectedProviders } = body;
+      const {
+        orgId,
+        fromEmail,
+        templateId,
+        templateName,
+        templateData,
+        subject,
+        html,
+        text,
+        providerDistribution,
+        selectedProviders,
+      } = body;
 
-      console.log(`\n[SES CAMPAIGN] org=${orgId} from=${fromEmail} templateId=${templateId || '-'} subject="${subject || ''}"`);
+      console.log(
+        `\n[SES CAMPAIGN] org=${orgId} from=${fromEmail} templateId=${templateId || "-"} subject="${subject || ""}"`,
+      );
 
-      const prepared = await prepareSesCampaign({ orgId, fromEmail, templateId, templateData, subject, html, text, providerDistribution, selectedProviders });
+      const prepared = await prepareSesCampaign({
+        orgId,
+        fromEmail,
+        templateId,
+        templateData,
+        subject,
+        html,
+        text,
+        providerDistribution,
+        selectedProviders,
+      });
 
       let campaign;
 
@@ -461,15 +681,16 @@ const server = http.createServer(async (req, res) => {
 
       if (templateId) {
         const { data: existing, error: lookupError } = await supabase
-          .from('ses_campaigns')
-          .select('*')
-          .eq('org_id', orgId)
-          .eq('from_email', fromEmail)
-          .eq('template_id', templateId)
+          .from("ses_campaigns")
+          .select("*")
+          .eq("org_id", orgId)
+          .eq("from_email", fromEmail)
+          .eq("template_id", templateId)
           .limit(1)
           .maybeSingle();
 
-        if (lookupError) return json(res, 500, { success: false, error: lookupError.message });
+        if (lookupError)
+          return json(res, 500, { success: false, error: lookupError.message });
 
         if (existing) {
           // Deliberately not touching is_active here: if the user paused
@@ -479,7 +700,7 @@ const server = http.createServer(async (req, res) => {
           // — is_active only gates the cron's daily pickup, not this
           // direct call.
           const { data: updated, error: updateError } = await supabase
-            .from('ses_campaigns')
+            .from("ses_campaigns")
             .update({
               template_data: templateData || null,
               subject: prepared.subject,
@@ -489,18 +710,22 @@ const server = http.createServer(async (req, res) => {
               provider_distribution: providerDistribution || null,
               selected_providers: selectedProviders || null,
             })
-            .eq('id', existing.id)
-            .select('*')
+            .eq("id", existing.id)
+            .select("*")
             .single();
 
-          if (updateError) return json(res, 500, { success: false, error: updateError.message });
+          if (updateError)
+            return json(res, 500, {
+              success: false,
+              error: updateError.message,
+            });
           campaign = updated;
         }
       }
 
       if (!campaign) {
         const { data: inserted, error: insertError } = await supabase
-          .from('ses_campaigns')
+          .from("ses_campaigns")
           .insert({
             org_id: orgId,
             from_email: fromEmail,
@@ -510,44 +735,57 @@ const server = http.createServer(async (req, res) => {
             subject: prepared.subject,
             html: html || null,
             text: text || null,
-            status: 'sending',
+            status: "sending",
             is_active: true,
             last_run_at: new Date().toISOString(),
             provider_distribution: providerDistribution || null,
             selected_providers: selectedProviders || null,
           })
-          .select('*')
+          .select("*")
           .single();
 
-        if (insertError) return json(res, 500, { success: false, error: insertError.message });
+        if (insertError)
+          return json(res, 500, { success: false, error: insertError.message });
         campaign = inserted;
       }
 
       runCampaignSend(campaign)
         .then((result) => {
-          console.log(`[SES CAMPAIGN] Done — Sent: ${result.sent} | Failed: ${result.failed} | ${result.duration}s\n`);
+          console.log(
+            `[SES CAMPAIGN] Done — Sent: ${result.sent} | Failed: ${result.failed} | ${result.duration}s\n`,
+          );
         })
         .catch((err) => {
-          console.error('[SES CAMPAIGN] Background send failed:', err.message);
+          console.error("[SES CAMPAIGN] Background send failed:", err.message);
         });
 
-      return json(res, 202, { success: true, id: campaign.id, status: 'sending' });
+      return json(res, 202, {
+        success: true,
+        id: campaign.id,
+        status: "sending",
+      });
     } catch (err) {
-      console.error('[SES CAMPAIGN] Error:', err.message);
+      console.error("[SES CAMPAIGN] Error:", err.message);
       return json(res, 400, { success: false, error: err.message });
     }
   }
 
   // ── GET /api/ses/campaigns?orgId=... ──────────────────────────────────────
-  if (req.method === 'GET' && url === '/api/ses/campaigns') {
-    const orgId = getQuery(req).get('orgId');
-    if (!orgId) return json(res, 400, { success: false, error: 'orgId query param is required.' });
+  if (req.method === "GET" && url === "/api/ses/campaigns") {
+    const orgId = getQuery(req).get("orgId");
+    if (!orgId)
+      return json(res, 400, {
+        success: false,
+        error: "orgId query param is required.",
+      });
 
     const { data, error } = await supabase
-      .from('ses_campaigns')
-      .select('id, from_email, template_id, template_name, status, total, sent, failed, duration, error, is_active, last_run_at, created_at')
-      .eq('org_id', orgId)
-      .order('created_at', { ascending: false })
+      .from("ses_campaigns")
+      .select(
+        "id, from_email, template_id, template_name, status, total, sent, failed, duration, error, is_active, last_run_at, created_at",
+      )
+      .eq("org_id", orgId)
+      .order("created_at", { ascending: false })
       .limit(50);
 
     if (error) return json(res, 500, { success: false, error: error.message });
@@ -574,14 +812,18 @@ const server = http.createServer(async (req, res) => {
   // ── DELETE /api/ses/campaigns/:id ─────────────────────────────────────────
   // Soft-stop: pauses the recurring daily resend without deleting history.
   // Same pattern as DELETE /api/integrations/ses/:id.
-  if (req.method === 'DELETE' && url.startsWith('/api/ses/campaigns/')) {
-    const id = url.slice('/api/ses/campaigns/'.length);
-    if (!id) return json(res, 400, { success: false, error: 'Campaign id is required.' });
+  if (req.method === "DELETE" && url.startsWith("/api/ses/campaigns/")) {
+    const id = url.slice("/api/ses/campaigns/".length);
+    if (!id)
+      return json(res, 400, {
+        success: false,
+        error: "Campaign id is required.",
+      });
 
     const { error } = await supabase
-      .from('ses_campaigns')
+      .from("ses_campaigns")
       .update({ is_active: false })
-      .eq('id', id);
+      .eq("id", id);
 
     if (error) return json(res, 500, { success: false, error: error.message });
     return json(res, 200, { success: true });
@@ -591,22 +833,33 @@ const server = http.createServer(async (req, res) => {
   // Un-pauses a campaign. Only flips is_active back on — last_run_at is left
   // untouched so the normal due-check on the next cron tick decides whether
   // it's immediately due or still has to wait out the rest of the 24h window.
-  if (req.method === 'POST' && url.startsWith('/api/ses/campaigns/') && url.endsWith('/resume')) {
-    const id = url.slice('/api/ses/campaigns/'.length, url.length - '/resume'.length);
-    if (!id) return json(res, 400, { success: false, error: 'Campaign id is required.' });
+  if (
+    req.method === "POST" &&
+    url.startsWith("/api/ses/campaigns/") &&
+    url.endsWith("/resume")
+  ) {
+    const id = url.slice(
+      "/api/ses/campaigns/".length,
+      url.length - "/resume".length,
+    );
+    if (!id)
+      return json(res, 400, {
+        success: false,
+        error: "Campaign id is required.",
+      });
 
     const { error } = await supabase
-      .from('ses_campaigns')
+      .from("ses_campaigns")
       .update({ is_active: true })
-      .eq('id', id);
+      .eq("id", id);
 
     if (error) return json(res, 500, { success: false, error: error.message });
     return json(res, 200, { success: true });
   }
 
   // ── 404 ───────────────────────────────────────────────────────────────────
-  res.writeHead(404, { 'Content-Type': 'text/plain' });
-  res.end('Not found');
+  res.writeHead(404, { "Content-Type": "text/plain" });
+  res.end("Not found");
 });
 
 server.listen(port, () => {
