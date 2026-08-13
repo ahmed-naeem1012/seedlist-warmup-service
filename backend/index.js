@@ -652,6 +652,7 @@ const server = http.createServer(async (req, res) => {
         text,
         providerDistribution,
         selectedProviders,
+        speedModeIndex,
       } = body;
 
       console.log(
@@ -709,6 +710,7 @@ const server = http.createServer(async (req, res) => {
               last_run_at: new Date().toISOString(),
               provider_distribution: providerDistribution || null,
               selected_providers: selectedProviders || null,
+              speed_mode_index: speedModeIndex ?? 1,
             })
             .eq("id", existing.id)
             .select("*")
@@ -740,6 +742,7 @@ const server = http.createServer(async (req, res) => {
             last_run_at: new Date().toISOString(),
             provider_distribution: providerDistribution || null,
             selected_providers: selectedProviders || null,
+            speed_mode_index: speedModeIndex ?? 1,
           })
           .select("*")
           .single();
