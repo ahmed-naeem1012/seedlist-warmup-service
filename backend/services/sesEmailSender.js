@@ -115,6 +115,13 @@ const TEST_EMAILS = [
 const CLICK_URL = process.env.SES_CAMPAIGN_CLICK_URL || 'https://www.google.com';
 const SEND_CONCURRENCY = parseInt(process.env.SES_SEND_CONCURRENCY || '5');
 
+// Hard cap on how many seedlist recipients a single ses_campaigns row reaches
+// per run — applies to both the first send (on template save) and every
+// daily cron resend, since both go through executeSesSend below. A sender
+// with N active templates still sends N x this cap per day, not more, since
+// the cap is per campaign row, not shared across a sender's other templates.
+const CAMPAIGN_MAX_RECIPIENTS = parseInt(process.env.SES_CAMPAIGN_MAX_RECIPIENTS || '100');
+
 const createConcurrencyLimiter = (max) => {
   let running = 0;
   const queue = [];
@@ -285,11 +292,26 @@ const resolveProviderFilter = (selectedProviders, providerDistribution) => {
   return null;
 };
 
-// Supabase/PostgREST caps unpaginated selects at 1000 rows (db-max-rows) — page
-// through with .range() so campaigns actually reach every active mailbox, not
-// just the first 1000.
+// Fisher-Yates — same technique the engagement scripts elsewhere in this repo
+// (scripts/seedlist engagments/*/engage-*.js) already use for picking which
+// mailboxes to act on. Used here so every campaign run reaches a different
+// random slice of the seedlist instead of the same leading rows every time.
+const shuffle = (arr) => {
+  const result = [...arr];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+};
+
+// Supabase/PostgREST caps unpaginated selects at 1000 rows (db-max-rows) —
+// page through with .range() to load every matching mailbox, then shuffle
+// and take `limit` of them. Loads the full filtered pool every call (rather
+// than stopping at `limit`) specifically so the random slice isn't biased
+// toward whatever rows Postgres happens to return first.
 const MAILBOX_PAGE_SIZE = 1000;
-const fetchAllActiveMailboxEmails = async (providerFilter) => {
+const fetchActiveMailboxEmails = async (providerFilter, limit) => {
   const emails = [];
   let offset = 0;
 
@@ -314,17 +336,17 @@ const fetchAllActiveMailboxEmails = async (providerFilter) => {
     offset += MAILBOX_PAGE_SIZE;
   }
 
-  return emails;
+  return shuffle(emails).slice(0, limit);
 };
 
 // Validates the request and resolves everything the send needs (template,
 // integration/credentials) up front. Deliberately does NOT fetch the
-// recipient list — fetchAllActiveMailboxEmails() pages through the seedlist
-// 1000 rows at a time and, on its own, can take well past a minute once the
-// seedlist is large. Only point lookups (template by id, integration by
-// org+email) belong in this synchronous path; both the recipient fetch and
-// the actual sends run in the background via executeSesSend. See
-// migrations/003_ses_campaigns.sql for why.
+// recipient list — fetchActiveMailboxEmails() pages through the whole
+// filtered seedlist (needed so the random slice it picks isn't biased) and,
+// on its own, can take well past a minute once the seedlist is large. Only
+// point lookups (template by id, integration by org+email) belong in this
+// synchronous path; both the recipient fetch and the actual sends run in the
+// background via executeSesSend. See migrations/003_ses_campaigns.sql for why.
 const prepareSesCampaign = async ({ orgId, fromEmail, templateId, templateData, subject, html, text, providerDistribution, selectedProviders } = {}) => {
   if (!orgId) throw new Error('orgId is required.');
   if (!fromEmail) throw new Error('fromEmail is required.');
@@ -374,9 +396,9 @@ const prepareSesCampaign = async ({ orgId, fromEmail, templateId, templateData, 
   return { orgId, fromEmail, subject, body, client, providerFilter };
 };
 
-// Runs the actual send prepared above: fetches the full recipient list (the
-// part that can itself take well over a minute against a large seedlist —
-// see prepareSesCampaign) and then sends, throttled to SEND_CONCURRENCY.
+// Runs the actual send prepared above: fetches a random CAMPAIGN_MAX_RECIPIENTS-
+// sized slice of the seedlist (see prepareSesCampaign for why this stays out
+// of the synchronous request path) and then sends, throttled to SEND_CONCURRENCY.
 // Callers must run this in the background rather than awaiting it inline in
 // an HTTP request. `onRecipientsResolved`, if given, is awaited with the
 // recipient count as soon as the list is known, before sending starts, so
@@ -384,7 +406,7 @@ const prepareSesCampaign = async ({ orgId, fromEmail, templateId, templateData, 
 const executeSesSend = async ({ orgId, fromEmail, subject, body, client, onRecipientsResolved, providerFilter }) => {
   const startTime = Date.now();
 
-  const to = await fetchAllActiveMailboxEmails(providerFilter);
+  const to = await fetchActiveMailboxEmails(providerFilter, CAMPAIGN_MAX_RECIPIENTS);
   if (onRecipientsResolved) await onRecipientsResolved(to.length);
 
   let sent = 0;
