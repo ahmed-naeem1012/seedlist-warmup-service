@@ -4,8 +4,17 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const supabase = require('./supabaseClient');
 const { decrypt } = require('../utils/crypto');
-const { renderTemplate, renderHandlebars } = require('../utils/templateRenderer');
+const { renderHandlebars } = require('../utils/templateRenderer');
 const { derivePersonalizationVariables } = require('../utils/personalization');
+const {
+  loadTemplateIfNeeded,
+  createConcurrencyLimiter,
+  createRateLimiter,
+  SEND_CONCURRENCY,
+  CAMPAIGN_MAX_RECIPIENTS,
+  resolveProviderFilter,
+  fetchActiveMailboxEmails
+} = require('./campaignSendShared');
 
 // The same 100 test auto-responder mailboxes that engage-test-ses.js monitors.
 // These receive the SES campaign so the engagement cron has emails to open/click.
@@ -113,61 +122,15 @@ const TEST_EMAILS = [
 ];
 
 const CLICK_URL = process.env.SES_CAMPAIGN_CLICK_URL || 'https://www.google.com';
-const SEND_CONCURRENCY = parseInt(process.env.SES_SEND_CONCURRENCY || '5');
 
-// Hard cap on how many seedlist recipients a single ses_campaigns row reaches
-// per run — applies to both the first send (on template save) and every
-// daily cron resend, since both go through executeSesSend below. A sender
-// with N active templates still sends N x this cap per day, not more, since
-// the cap is per campaign row, not shared across a sender's other templates.
-const CAMPAIGN_MAX_RECIPIENTS = parseInt(process.env.SES_CAMPAIGN_MAX_RECIPIENTS || '100');
-
-const createConcurrencyLimiter = (max) => {
-  let running = 0;
-  const queue = [];
-  return (fn) => {
-    const run = () => {
-      running++;
-      return fn().finally(() => {
-        running--;
-        if (queue.length > 0) queue.shift()();
-      });
-    };
-    if (running < max) return run();
-    return new Promise(resolve => queue.push(resolve)).then(run);
-  };
-};
-
-// Hard cap on SES send calls per second. SEND_CONCURRENCY above only limits
-// how many sends are in flight at once — it doesn't stop new ones from
-// starting faster than 1/second once earlier sends finish. This is a
-// separate token-bucket limiter for that, shared by every send path below
+// Hard cap on SES send calls per second. SEND_CONCURRENCY (campaignSendShared)
+// only limits how many sends are in flight at once — it doesn't stop new ones
+// from starting faster than 1/second once earlier sends finish. This is a
+// separate token-bucket limiter for that, shared by every SES send path below
 // (test campaigns, real campaigns, recurring cron resends) so a manual send
 // and a resend firing at the same time still can't push the combined rate
-// past this.
+// past this. Resend gets its own, separate limiter — see resendEmailSender.js.
 const SEND_RATE_PER_SECOND = parseInt(process.env.SES_SEND_RATE_PER_SECOND || '11');
-
-const createRateLimiter = (maxPerSecond) => {
-  let tokens = maxPerSecond;
-  const queue = [];
-
-  setInterval(() => {
-    tokens = maxPerSecond;
-    while (tokens > 0 && queue.length > 0) {
-      tokens--;
-      queue.shift()();
-    }
-  }, 1000).unref();
-
-  return () => {
-    if (tokens > 0) {
-      tokens--;
-      return Promise.resolve();
-    }
-    return new Promise(resolve => queue.push(resolve));
-  };
-};
-
 const acquireSendSlot = createRateLimiter(SEND_RATE_PER_SECOND);
 
 const buildEmailHtml = (subject, clickUrl) => `<!DOCTYPE html>
@@ -269,76 +232,6 @@ const sendSesTestCampaign = async ({ subject, fromEmail, recipients, clickUrl } 
   return { sent, failed, total: to.length, errors, duration };
 };
 
-// auto_responder_mailboxes is Google-infrastructure-only (imap_host/smtp_host
-// default to imap.gmail.com/smtp.gmail.com) — the only real split within it
-// is @gmail.com vs. custom-domain (Google Workspace) addresses, no Microsoft
-// representation exists in this pool. Resolves the org's warmup_preferences
-// down to which half of that split a campaign should send to.
-//
-// gsuite ("Gmail") selected, google not -> gmail.com only
-// google selected, gsuite not -> custom domain only (excludes gmail.com)
-// both selected, neither selected (e.g. only ms365/outlook), or no
-// preferences at all -> null (no filter, full pool) — safe default so orgs
-// that haven't touched warmup preferences see no behavior change.
-const resolveProviderFilter = (selectedProviders, providerDistribution) => {
-  const selected = selectedProviders || [];
-  const distribution = providerDistribution || {};
-
-  const hasGsuite = selected.includes('gsuite') && (distribution.gsuite || 0) > 0;
-  const hasGoogle = selected.includes('google') && (distribution.google || 0) > 0;
-
-  if (hasGsuite && !hasGoogle) return 'gmail_only';
-  if (hasGoogle && !hasGsuite) return 'custom_domain_only';
-  return null;
-};
-
-// Fisher-Yates — same technique the engagement scripts elsewhere in this repo
-// (scripts/seedlist engagments/*/engage-*.js) already use for picking which
-// mailboxes to act on. Used here so every campaign run reaches a different
-// random slice of the seedlist instead of the same leading rows every time.
-const shuffle = (arr) => {
-  const result = [...arr];
-  for (let i = result.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [result[i], result[j]] = [result[j], result[i]];
-  }
-  return result;
-};
-
-// Supabase/PostgREST caps unpaginated selects at 1000 rows (db-max-rows) —
-// page through with .range() to load every matching mailbox, then shuffle
-// and take `limit` of them. Loads the full filtered pool every call (rather
-// than stopping at `limit`) specifically so the random slice isn't biased
-// toward whatever rows Postgres happens to return first.
-const MAILBOX_PAGE_SIZE = 1000;
-const fetchActiveMailboxEmails = async (providerFilter, limit) => {
-  const emails = [];
-  let offset = 0;
-
-  while (true) {
-    let query = supabase
-      .from('auto_responder_mailboxes')
-      .select('email')
-      .eq('is_active', true);
-
-    if (providerFilter === 'gmail_only') {
-      query = query.ilike('email', '%@gmail.com');
-    } else if (providerFilter === 'custom_domain_only') {
-      query = query.not('email', 'ilike', '%@gmail.com');
-    }
-
-    const { data, error } = await query.range(offset, offset + MAILBOX_PAGE_SIZE - 1);
-
-    if (error) throw new Error(`Failed to load recipients: ${error.message}`);
-
-    emails.push(...data.map(m => m.email));
-    if (data.length < MAILBOX_PAGE_SIZE) break;
-    offset += MAILBOX_PAGE_SIZE;
-  }
-
-  return shuffle(emails).slice(0, limit);
-};
-
 // Validates the request and resolves everything the send needs (template,
 // integration/credentials) up front. Deliberately does NOT fetch the
 // recipient list — fetchActiveMailboxEmails() pages through the whole
@@ -353,20 +246,9 @@ const prepareSesCampaign = async ({ orgId, fromEmail, templateId, templateData, 
   if (!templateId && !subject) throw new Error('subject is required when not using templateId.');
   if (!templateId && !html && !text) throw new Error('At least one of templateId, html or text is required.');
 
-  if (templateId && !html) {
-    const { data: template, error: templateError } = await supabase
-      .from('templates')
-      .select('*')
-      .eq('id', templateId)
-      .eq('workspace_id', orgId)
-      .single();
-
-    if (templateError) throw new Error(`Failed to load template: ${templateError.message}`);
-    if (!template) throw new Error(`No template ${templateId} found for org ${orgId}.`);
-
-    subject = template.subject || subject;
-    html = renderTemplate(template, templateData || {});
-  }
+  const loaded = await loadTemplateIfNeeded({ orgId, templateId, templateData, subject, html });
+  subject = loaded.subject;
+  html = loaded.html;
 
   const { data: integration, error: integrationError } = await supabase
     .from('ses_integrations')
@@ -453,101 +335,4 @@ const executeSesSend = async ({ orgId, fromEmail, subject, body, client, onRecip
   return { sent, failed, total: to.length, errors, duration };
 };
 
-// Runs one send for an existing ses_campaigns definition row — the first
-// send (called synchronously-in-background by the API route right after the
-// definition row is inserted) and every recurring daily resend (called by
-// the cron job in cronJobs.js) both go through this one path. Never inserts
-// into ses_campaigns itself — campaignRow.id must already exist — it only
-// logs the run to ses_campaign_sends and updates both rows' status on
-// completion.
-const runCampaignSend = async (campaignRow) => {
-  const {
-    id: campaignId,
-    org_id: orgId,
-    from_email: fromEmail,
-    template_id: templateId,
-    template_name: templateName,
-    template_data: templateData,
-    subject,
-    html,
-    text,
-    provider_distribution: providerDistribution,
-    selected_providers: selectedProviders,
-  } = campaignRow;
-
-  // prepareSesCampaign and the ses_campaign_sends insert live inside this
-  // try too — if either throws before a send even starts, the catch below
-  // still needs to flip the parent ses_campaigns row out of 'sending',
-  // otherwise it's stuck there forever with no retry (the cron's due-query
-  // excludes 'sending' rows from every future tick).
-  let sendRow;
-  try {
-    const prepared = await prepareSesCampaign({ orgId, fromEmail, templateId, templateData, subject, html, text, providerDistribution, selectedProviders });
-
-    const { data, error: insertError } = await supabase
-      .from('ses_campaign_sends')
-      .insert({
-        campaign_id: campaignId,
-        org_id: orgId,
-        from_email: fromEmail,
-        template_id: templateId || null,
-        template_name: templateName || null,
-        status: 'sending',
-        sent_at: new Date().toISOString(),
-      })
-      .select('id')
-      .single();
-
-    if (insertError) throw new Error(`Failed to create campaign send log: ${insertError.message}`);
-    sendRow = data;
-
-    const result = await executeSesSend({
-      ...prepared,
-      onRecipientsResolved: (total) =>
-        supabase.from('ses_campaigns').update({ total }).eq('id', campaignId),
-    });
-
-    await supabase
-      .from('ses_campaign_sends')
-      .update({
-        status: 'completed',
-        sent: result.sent,
-        failed: result.failed,
-        total: result.total,
-        duration: result.duration,
-        error: null,
-      })
-      .eq('id', sendRow.id);
-
-    await supabase
-      .from('ses_campaigns')
-      .update({
-        status: 'completed',
-        sent: result.sent,
-        failed: result.failed,
-        total: result.total,
-        duration: result.duration,
-        error: null,
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', campaignId);
-
-    return result;
-  } catch (err) {
-    if (sendRow) {
-      await supabase
-        .from('ses_campaign_sends')
-        .update({ status: 'failed', error: err.message })
-        .eq('id', sendRow.id);
-    }
-
-    await supabase
-      .from('ses_campaigns')
-      .update({ status: 'failed', error: err.message, completed_at: new Date().toISOString() })
-      .eq('id', campaignId);
-
-    throw err;
-  }
-};
-
-module.exports = { sendSesTestCampaign, prepareSesCampaign, executeSesSend, runCampaignSend, TEST_EMAILS };
+module.exports = { sendSesTestCampaign, prepareSesCampaign, executeSesSend, TEST_EMAILS };

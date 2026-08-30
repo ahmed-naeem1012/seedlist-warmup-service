@@ -8,11 +8,13 @@ const path = require("path");
 
 const {
   sendSesTestCampaign,
-  prepareSesCampaign,
-  executeSesSend,
-  runCampaignSend,
   TEST_EMAILS,
 } = require("./services/sesEmailSender");
+const {
+  runCampaignSend,
+  prepareCampaign,
+  normalizeProvider,
+} = require("./services/campaignRunner");
 const supabase = require("./services/supabaseClient");
 const { encrypt } = require("./utils/crypto");
 const {
@@ -654,12 +656,18 @@ const server = http.createServer(async (req, res) => {
         selectedProviders,
         speedModeIndex,
       } = body;
+      // Which outbound API actually sends this campaign - 'ses' (default,
+      // so every existing caller keeps working unchanged) or 'resend'. Not
+      // to be confused with providerDistribution/selectedProviders above,
+      // which filter which *recipients* get reached, not which API sends.
+      const provider = normalizeProvider(body.provider);
 
       console.log(
-        `\n[SES CAMPAIGN] org=${orgId} from=${fromEmail} templateId=${templateId || "-"} subject="${subject || ""}"`,
+        `\n[${provider.toUpperCase()} CAMPAIGN] org=${orgId} from=${fromEmail} templateId=${templateId || "-"} subject="${subject || ""}"`,
       );
 
-      const prepared = await prepareSesCampaign({
+      const prepared = await prepareCampaign({
+        provider,
         orgId,
         fromEmail,
         templateId,
@@ -678,7 +686,9 @@ const server = http.createServer(async (req, res) => {
       // new recurring campaign alongside the old one instead of updating
       // it — both would then go on sending daily forever, compounding with
       // every edit. Reuse the existing definition row for this
-      // org+sender+template instead of always inserting.
+      // org+sender+template+provider instead of always inserting - scoped
+      // by provider too so an SES and a Resend campaign definition for the
+      // same template can't collide into one.
 
       if (templateId) {
         const { data: existing, error: lookupError } = await supabase
@@ -687,6 +697,7 @@ const server = http.createServer(async (req, res) => {
           .eq("org_id", orgId)
           .eq("from_email", fromEmail)
           .eq("template_id", templateId)
+          .eq("send_provider", provider)
           .limit(1)
           .maybeSingle();
 
@@ -711,6 +722,7 @@ const server = http.createServer(async (req, res) => {
               provider_distribution: providerDistribution || null,
               selected_providers: selectedProviders || null,
               speed_mode_index: speedModeIndex ?? 1,
+              send_provider: provider,
             })
             .eq("id", existing.id)
             .select("*")
@@ -743,6 +755,7 @@ const server = http.createServer(async (req, res) => {
             provider_distribution: providerDistribution || null,
             selected_providers: selectedProviders || null,
             speed_mode_index: speedModeIndex ?? 1,
+            send_provider: provider,
           })
           .select("*")
           .single();
@@ -785,7 +798,7 @@ const server = http.createServer(async (req, res) => {
     const { data, error } = await supabase
       .from("ses_campaigns")
       .select(
-        "id, from_email, template_id, template_name, status, total, sent, failed, duration, error, is_active, last_run_at, created_at",
+        "id, from_email, template_id, template_name, send_provider, status, total, sent, failed, duration, error, is_active, last_run_at, created_at",
       )
       .eq("org_id", orgId)
       .order("created_at", { ascending: false })
@@ -798,6 +811,7 @@ const server = http.createServer(async (req, res) => {
       fromEmail: c.from_email,
       templateId: c.template_id,
       templateName: c.template_name,
+      provider: c.send_provider || "ses",
       sentAt: c.created_at,
       status: c.status,
       total: c.total,
