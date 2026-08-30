@@ -6,7 +6,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-const { sendSesTestCampaign, prepareSesCampaign, executeSesSend, runCampaignSend, TEST_EMAILS } = require('./services/sesEmailSender');
+const { sendSesTestCampaign, TEST_EMAILS } = require('./services/sesEmailSender');
+const { runCampaignSend, prepareCampaign, normalizeProvider } = require('./services/campaignRunner');
 const supabase = require('./services/supabaseClient');
 const { encrypt } = require('./utils/crypto');
 const { getPlatformSesCredentials, createDomainIdentity } = require('./services/sesDomainIdentity');
@@ -417,10 +418,16 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await parseBody(req);
       const { orgId, fromEmail, templateId, templateName, templateData, subject, html, text, providerDistribution, selectedProviders } = body;
+      // Which transport actually sends this campaign - 'ses' (default, so
+      // every existing caller keeps working unchanged) or 'resend'. Not to
+      // be confused with providerDistribution/selectedProviders above, which
+      // filter which *recipients* (gmail.com vs custom-domain) get reached -
+      // this is about which outbound API sends them.
+      const provider = normalizeProvider(body.provider);
 
-      console.log(`\n[SES CAMPAIGN] org=${orgId} from=${fromEmail} templateId=${templateId || '-'} subject="${subject || ''}"`);
+      console.log(`\n[${provider.toUpperCase()} CAMPAIGN] org=${orgId} from=${fromEmail} templateId=${templateId || '-'} subject="${subject || ''}"`);
 
-      const prepared = await prepareSesCampaign({ orgId, fromEmail, templateId, templateData, subject, html, text, providerDistribution, selectedProviders });
+      const prepared = await prepareCampaign({ provider, orgId, fromEmail, templateId, templateData, subject, html, text, providerDistribution, selectedProviders });
 
       let campaign;
 
@@ -429,7 +436,9 @@ const server = http.createServer(async (req, res) => {
       // new recurring campaign alongside the old one instead of updating
       // it — both would then go on sending daily forever, compounding with
       // every edit. Reuse the existing definition row for this
-      // org+sender+template instead of always inserting.
+      // org+sender+template+provider instead of always inserting - scoped by
+      // provider too so a sender that somehow has both an SES and a Resend
+      // campaign definition for the same template don't collide into one.
 
       if (templateId) {
         const { data: existing, error: lookupError } = await supabase
@@ -438,6 +447,7 @@ const server = http.createServer(async (req, res) => {
           .eq('org_id', orgId)
           .eq('from_email', fromEmail)
           .eq('template_id', templateId)
+          .eq('send_provider', provider)
           .limit(1)
           .maybeSingle();
 
@@ -482,6 +492,7 @@ const server = http.createServer(async (req, res) => {
             subject: prepared.subject,
             html: html || null,
             text: text || null,
+            send_provider: provider,
             status: 'sending',
             is_active: true,
             last_run_at: new Date().toISOString(),
@@ -517,7 +528,7 @@ const server = http.createServer(async (req, res) => {
 
     const { data, error } = await supabase
       .from('ses_campaigns')
-      .select('id, from_email, template_id, template_name, status, total, sent, failed, duration, error, is_active, last_run_at, created_at')
+      .select('id, from_email, template_id, template_name, send_provider, status, total, sent, failed, duration, error, is_active, last_run_at, created_at')
       .eq('org_id', orgId)
       .order('created_at', { ascending: false })
       .limit(50);
@@ -529,6 +540,7 @@ const server = http.createServer(async (req, res) => {
       fromEmail: c.from_email,
       templateId: c.template_id,
       templateName: c.template_name,
+      provider: c.send_provider || 'ses',
       sentAt: c.created_at,
       status: c.status,
       total: c.total,

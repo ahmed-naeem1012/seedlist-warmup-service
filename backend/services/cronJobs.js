@@ -2,7 +2,7 @@ const cron = require('node-cron');
 const rollbar = require('../middlewares/trackers/rollbar');
 
 const supabase = require('./supabaseClient');
-const { runCampaignSend } = require('./sesEmailSender');
+const { runCampaignSend } = require('./campaignRunner');
 
 const { engageTestBrevo } = require('../scripts/seedlist engagments/test engagments/engage-test-brevo');
 const { engageSeedlistBrevo } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-brevo');
