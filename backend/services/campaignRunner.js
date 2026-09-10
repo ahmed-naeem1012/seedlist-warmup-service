@@ -15,9 +15,14 @@
 //                      dashboard (organization_warmup_emails, provider
 //                      'smtp'); sends over its own SMTP server - see
 //                      smtpEmailSender.js and migrations/011.
+//       'oauth'      - a warmup mailbox connected via Google/Outlook OAuth
+//                      on the dashboard (organization_warmup_emails,
+//                      provider 'google' | 'outlook'); sends via the Gmail
+//                      API / Microsoft Graph with the row's token - see
+//                      oauthEmailSender.js and migrations/012.
 //   - TRANSPORT (send_provider on ses_campaign_sends - what actually sent
-//     this specific run): 'ses' | 'platform_ses' | 'resend' | 'smtp'
-// For the 'ses' and 'smtp' pools these are the same value. For 'custom_dns', every run
+//     this specific run): 'ses' | 'platform_ses' | 'resend' | 'smtp' | 'oauth'
+// For the 'ses', 'smtp' and 'oauth' pools these are the same value. For 'custom_dns', every run
 // (including every cron resend) re-resolves which transport to use, per
 // the user's priority rule: SES wins whenever the domain's SES identity is
 // verified, Resend is only ever used as a fallback when SES isn't. This is
@@ -33,8 +38,9 @@ const { prepareSesCampaign, executeSesSend } = require('./sesEmailSender');
 const { prepareResendCampaign, executeResendSend } = require('./resendEmailSender');
 const { preparePlatformSesCampaign, executePlatformSesSend } = require('./platformSesEmailSender');
 const { prepareSmtpCampaign, executeSmtpSend } = require('./smtpEmailSender');
+const { prepareOauthCampaign, executeOauthSend } = require('./oauthEmailSender');
 
-const VALID_POOLS = ['ses', 'custom_dns', 'smtp'];
+const VALID_POOLS = ['ses', 'custom_dns', 'smtp', 'oauth'];
 
 const normalizeProvider = (provider) =>
   VALID_POOLS.includes(provider) ? provider : 'ses';
@@ -82,6 +88,10 @@ const prepareCampaign = async ({ provider, ...args }) => {
     return { ...(await prepareSmtpCampaign(args)), transport: 'smtp' };
   }
 
+  if (pool === 'oauth') {
+    return { ...(await prepareOauthCampaign(args)), transport: 'oauth' };
+  }
+
   return { ...(await prepareSesCampaign(args)), transport: 'ses' };
 };
 
@@ -89,6 +99,7 @@ const executeCampaignSend = ({ transport, ...args }) => {
   if (transport === 'platform_ses') return executePlatformSesSend(args);
   if (transport === 'resend') return executeResendSend(args);
   if (transport === 'smtp') return executeSmtpSend(args);
+  if (transport === 'oauth') return executeOauthSend(args);
   return executeSesSend(args);
 };
 
