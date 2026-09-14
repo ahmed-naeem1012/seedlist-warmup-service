@@ -826,6 +826,48 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { success: true, campaigns });
   }
 
+  // ── DELETE /api/ses/campaigns/by-template/:templateId?orgId=... ───────────
+  // Stops every campaign created from one template: sets is_active = false
+  // on each ses_campaigns row so the hourly resend cron never picks them up
+  // again. Rows and their ses_campaign_sends history are kept - this is a
+  // soft-stop, same as DELETE /api/ses/campaigns/:id, just for a whole
+  // template at once. Called by inboxifi-backend when a template is deleted
+  // from the dashboard: a campaign row carries its own copy of the
+  // subject/html and never re-reads the template, so without this the cron
+  // keeps sending a deleted template forever.
+  // Must stay above the generic DELETE /api/ses/campaigns/:id matcher.
+  if (
+    req.method === "DELETE" &&
+    url.startsWith("/api/ses/campaigns/by-template/")
+  ) {
+    const templateId = url.slice("/api/ses/campaigns/by-template/".length);
+    const orgId = getQuery(req).get("orgId");
+    if (!templateId || !orgId)
+      return json(res, 400, {
+        success: false,
+        error: "templateId path param and orgId query param are required.",
+      });
+
+    const { data: stopped, error } = await supabase
+      .from("ses_campaigns")
+      .update({ is_active: false })
+      .eq("org_id", orgId)
+      .eq("template_id", templateId)
+      .eq("is_active", true)
+      .select("id");
+
+    if (error) return json(res, 500, { success: false, error: error.message });
+
+    console.log(
+      `[STOP campaigns by template] org=${orgId} template=${templateId} stopped=${(stopped || []).length}`,
+    );
+
+    return json(res, 200, {
+      success: true,
+      stoppedCampaigns: (stopped || []).length,
+    });
+  }
+
   // ── DELETE /api/ses/campaigns/:id ─────────────────────────────────────────
   // Soft-stop: pauses the recurring daily resend without deleting history.
   // Same pattern as DELETE /api/integrations/ses/:id.
