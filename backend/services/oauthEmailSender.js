@@ -198,7 +198,7 @@ const executeOauthSend = async ({ orgId, fromEmail, mailboxId, subject, html, te
     mailbox = await refreshViaBackend(mailbox);
   }
 
-  const to = await fetchActiveMailboxEmails(providerFilter, OAUTH_CAMPAIGN_MAX_RECIPIENTS);
+  const to = await fetchActiveMailboxEmails(providerFilter, OAUTH_CAMPAIGN_MAX_RECIPIENTS, { selectedProviders, providerDistribution });
   if (onRecipientsResolved) await onRecipientsResolved(to.length);
 
   let sent = 0;

@@ -73,7 +73,7 @@ const prepareResendCampaign = async ({ orgId, fromEmail, templateId, templateDat
 const executeResendSend = async ({ orgId, fromEmail, subject, html, text, onRecipientsResolved, providerFilter }) => {
   const startTime = Date.now();
 
-  const to = await fetchActiveMailboxEmails(providerFilter, CAMPAIGN_MAX_RECIPIENTS);
+  const to = await fetchActiveMailboxEmails(providerFilter, CAMPAIGN_MAX_RECIPIENTS, { selectedProviders, providerDistribution });
   if (onRecipientsResolved) await onRecipientsResolved(to.length);
 
   let sent = 0;

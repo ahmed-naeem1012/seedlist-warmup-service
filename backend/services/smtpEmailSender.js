@@ -121,7 +121,7 @@ const executeSmtpSend = async ({ orgId, fromEmail, fromName, subject, html, text
     throw new Error(`SMTP login failed for ${fromEmail}: ${err.message}`);
   }
 
-  const to = await fetchActiveMailboxEmails(providerFilter, SMTP_CAMPAIGN_MAX_RECIPIENTS);
+  const to = await fetchActiveMailboxEmails(providerFilter, SMTP_CAMPAIGN_MAX_RECIPIENTS, { selectedProviders, providerDistribution });
   if (onRecipientsResolved) await onRecipientsResolved(to.length);
 
   let sent = 0;
