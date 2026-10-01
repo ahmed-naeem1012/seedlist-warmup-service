@@ -117,13 +117,55 @@ const shuffle = (arr) => {
   return result;
 };
 
+// Share of a campaign's recipients that should be Outlook seeds
+// (admin_seedlist_outlook_accounts, maxify-proj/backend's Microsoft seedlist -
+// engaged there by scripts/outlook-seedlist-warmup-engagement.js): the
+// ms365 + outlook weight over the total weight of the selected providers.
+// 0 unless OUTLOOK_SEEDLIST_ENABLED=true, so behaviour is unchanged until then.
+const resolveOutlookShare = (selectedProviders, providerDistribution) => {
+  if (process.env.OUTLOOK_SEEDLIST_ENABLED !== 'true') return 0;
+  const selected = selectedProviders || [];
+  const distribution = providerDistribution || {};
+
+  const weightOf = (key) => (selected.includes(key) ? distribution[key] || 0 : 0);
+  const total = selected.reduce((sum, key) => sum + (distribution[key] || 0), 0);
+  if (total <= 0) return 0;
+  return (weightOf('ms365') + weightOf('outlook')) / total;
+};
+
+const fetchOutlookSeedEmails = async (limit) => {
+  const { data, error } = await supabase
+    .from('admin_seedlist_outlook_accounts')
+    .select('email')
+    .eq('is_active', true)
+    .eq('connection_status', 'connected');
+
+  if (error) {
+    console.warn(`Could not load Outlook seeds, using Gmail/Google seedlist only: ${error.message}`);
+    return [];
+  }
+  return shuffle((data || []).map(m => m.email)).slice(0, limit);
+};
+
 // Supabase/PostgREST caps unpaginated selects at 1000 rows (db-max-rows) -
 // page through with .range() to load every matching mailbox, then shuffle
 // and take `limit` of them. Loads the full filtered pool every call (rather
 // than stopping at `limit`) specifically so the random slice isn't biased
 // toward whatever rows Postgres happens to return first.
+//
+// `preferences` ({ selectedProviders, providerDistribution }) is optional:
+// with OUTLOOK_SEEDLIST_ENABLED=true and ms365/outlook weighted, that share
+// of `limit` goes to Outlook seeds and the rest to auto_responder_mailboxes.
+// If fewer Outlook seeds are connected, the Gmail/Google pool fills the gap.
 const MAILBOX_PAGE_SIZE = 1000;
-const fetchActiveMailboxEmails = async (providerFilter, limit) => {
+const fetchActiveMailboxEmails = async (providerFilter, limit, preferences = {}) => {
+  const outlookShare = resolveOutlookShare(preferences.selectedProviders, preferences.providerDistribution);
+  const outlookEmails = outlookShare > 0
+    ? await fetchOutlookSeedEmails(Math.max(1, Math.round(limit * outlookShare)))
+    : [];
+  const googleLimit = limit - outlookEmails.length;
+  if (googleLimit <= 0) return outlookEmails;
+
   const emails = [];
   let offset = 0;
 
@@ -148,7 +190,7 @@ const fetchActiveMailboxEmails = async (providerFilter, limit) => {
     offset += MAILBOX_PAGE_SIZE;
   }
 
-  return shuffle(emails).slice(0, limit);
+  return shuffle([...outlookEmails, ...shuffle(emails).slice(0, googleLimit)]);
 };
 
 module.exports = {
