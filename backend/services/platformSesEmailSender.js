@@ -18,7 +18,6 @@ const {
   createConcurrencyLimiter,
   createRateLimiter,
   SEND_CONCURRENCY,
-  CAMPAIGN_MAX_RECIPIENTS,
   resolveProviderFilter,
   fetchActiveMailboxEmails
 } = require('./campaignSendShared');
@@ -78,10 +77,10 @@ const preparePlatformSesCampaign = async ({ orgId, fromEmail, templateId, templa
 // Identical loop shape to executeSesSend - same personalization, same
 // concurrency limiter, own rate limiter, just built fresh per call from the
 // platform account instead of a decrypted customer key pair.
-const executePlatformSesSend = async ({ orgId, fromEmail, subject, body, client, onRecipientsResolved, providerFilter }) => {
+const executePlatformSesSend = async ({ orgId, fromEmail, subject, body, client, onRecipientsResolved, providerFilter, recipientLimit, selectedProviders, providerDistribution }) => {
   const startTime = Date.now();
 
-  const to = await fetchActiveMailboxEmails(providerFilter, CAMPAIGN_MAX_RECIPIENTS, { selectedProviders, providerDistribution });
+  const to = await fetchActiveMailboxEmails(providerFilter, recipientLimit, { selectedProviders, providerDistribution });
   if (onRecipientsResolved) await onRecipientsResolved(to.length);
 
   let sent = 0;

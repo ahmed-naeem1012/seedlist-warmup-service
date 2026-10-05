@@ -33,7 +33,6 @@ const {
 } = require('./campaignSendShared');
 
 const MAXIFY_BACKEND_URL = (process.env.MAXIFY_BACKEND_URL || 'https://api.maxify.co').replace(/\/$/, '');
-const OAUTH_CAMPAIGN_MAX_RECIPIENTS = parseInt(process.env.OAUTH_CAMPAIGN_MAX_RECIPIENTS || '30');
 const OAUTH_SEND_DELAY_MS = parseInt(process.env.OAUTH_SEND_DELAY_MS || '4000');
 // Same 5-minute early-refresh window as the backend's refreshTokenIfNeeded.
 const TOKEN_REFRESH_WINDOW_MS = 5 * 60 * 1000;
@@ -187,7 +186,7 @@ const prepareOauthCampaign = async ({ orgId, fromEmail, templateId, templateData
 
 // Runs the actual send prepared above. Same result shape as the other
 // execute*Send functions so campaignRunner.js's bookkeeping is unchanged.
-const executeOauthSend = async ({ orgId, fromEmail, mailboxId, subject, html, text, onRecipientsResolved, providerFilter }) => {
+const executeOauthSend = async ({ orgId, fromEmail, mailboxId, subject, html, text, onRecipientsResolved, providerFilter, recipientLimit, selectedProviders, providerDistribution }) => {
   const startTime = Date.now();
 
   // Re-read the row now (not the prepare-time copy) so a token the backend
@@ -198,7 +197,7 @@ const executeOauthSend = async ({ orgId, fromEmail, mailboxId, subject, html, te
     mailbox = await refreshViaBackend(mailbox);
   }
 
-  const to = await fetchActiveMailboxEmails(providerFilter, OAUTH_CAMPAIGN_MAX_RECIPIENTS, { selectedProviders, providerDistribution });
+  const to = await fetchActiveMailboxEmails(providerFilter, recipientLimit, { selectedProviders, providerDistribution });
   if (onRecipientsResolved) await onRecipientsResolved(to.length);
 
   let sent = 0;

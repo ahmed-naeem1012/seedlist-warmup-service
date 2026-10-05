@@ -11,7 +11,6 @@ const {
   createConcurrencyLimiter,
   createRateLimiter,
   SEND_CONCURRENCY,
-  CAMPAIGN_MAX_RECIPIENTS,
   resolveProviderFilter,
   fetchActiveMailboxEmails
 } = require('./campaignSendShared');
@@ -278,17 +277,17 @@ const prepareSesCampaign = async ({ orgId, fromEmail, templateId, templateData, 
   return { orgId, fromEmail, subject, body, client, providerFilter };
 };
 
-// Runs the actual send prepared above: fetches a random CAMPAIGN_MAX_RECIPIENTS-
+// Runs the actual send prepared above: fetches a random recipientLimit-
 // sized slice of the seedlist (see prepareSesCampaign for why this stays out
 // of the synchronous request path) and then sends, throttled to SEND_CONCURRENCY.
 // Callers must run this in the background rather than awaiting it inline in
 // an HTTP request. `onRecipientsResolved`, if given, is awaited with the
 // recipient count as soon as the list is known, before sending starts, so
 // callers can persist it without waiting for the whole send to finish.
-const executeSesSend = async ({ orgId, fromEmail, subject, body, client, onRecipientsResolved, providerFilter }) => {
+const executeSesSend = async ({ orgId, fromEmail, subject, body, client, onRecipientsResolved, providerFilter, recipientLimit, selectedProviders, providerDistribution }) => {
   const startTime = Date.now();
 
-  const to = await fetchActiveMailboxEmails(providerFilter, CAMPAIGN_MAX_RECIPIENTS, { selectedProviders, providerDistribution });
+  const to = await fetchActiveMailboxEmails(providerFilter, recipientLimit, { selectedProviders, providerDistribution });
   if (onRecipientsResolved) await onRecipientsResolved(to.length);
 
   let sent = 0;

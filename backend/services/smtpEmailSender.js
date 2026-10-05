@@ -15,8 +15,9 @@
 // Pacing is deliberately much gentler than SES/Resend. Those talk to an
 // API built for volume; this is one real mailbox on Gmail/Outlook/cPanel
 // SMTP, which will throttle or flag a burst. So: one message at a time,
-// a fixed delay between messages, and a lower recipient cap - all
-// overridable via env (see .env.example).
+// with a fixed delay between messages (overridable via env, see
+// .env.example). How many go out per run is the mailbox's template share
+// of its daily number - see dailyQuota.js.
 
 const nodemailer = require('nodemailer');
 const supabase = require('./supabaseClient');
@@ -29,9 +30,6 @@ const {
   fetchActiveMailboxEmails
 } = require('./campaignSendShared');
 
-// Per run, per sender. 30 is a safe daily volume for a single warmed
-// app-password mailbox; SES/Resend default to 100.
-const SMTP_CAMPAIGN_MAX_RECIPIENTS = parseInt(process.env.SMTP_CAMPAIGN_MAX_RECIPIENTS || '30');
 // Gap between consecutive messages from the same mailbox.
 const SMTP_SEND_DELAY_MS = parseInt(process.env.SMTP_SEND_DELAY_MS || '4000');
 
@@ -108,7 +106,7 @@ const prepareSmtpCampaign = async ({ orgId, fromEmail, templateId, templateData,
 
 // Runs the actual send prepared above. Same result shape as the other
 // execute*Send functions so campaignRunner.js's bookkeeping is unchanged.
-const executeSmtpSend = async ({ orgId, fromEmail, fromName, subject, html, text, smtpConfig, onRecipientsResolved, providerFilter }) => {
+const executeSmtpSend = async ({ orgId, fromEmail, fromName, subject, html, text, smtpConfig, onRecipientsResolved, providerFilter, recipientLimit, selectedProviders, providerDistribution }) => {
   const startTime = Date.now();
 
   const transporter = nodemailer.createTransport(smtpConfig);
@@ -121,7 +119,7 @@ const executeSmtpSend = async ({ orgId, fromEmail, fromName, subject, html, text
     throw new Error(`SMTP login failed for ${fromEmail}: ${err.message}`);
   }
 
-  const to = await fetchActiveMailboxEmails(providerFilter, SMTP_CAMPAIGN_MAX_RECIPIENTS, { selectedProviders, providerDistribution });
+  const to = await fetchActiveMailboxEmails(providerFilter, recipientLimit, { selectedProviders, providerDistribution });
   if (onRecipientsResolved) await onRecipientsResolved(to.length);
 
   let sent = 0;

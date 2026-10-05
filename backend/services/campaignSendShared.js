@@ -75,11 +75,12 @@ const createRateLimiter = (maxPerSecond) => {
   };
 };
 
-// Shared caps - not provider-specific, since they're about not hammering
-// the shared auto_responder_mailboxes seedlist pool rather than either
-// provider's own API limits.
+// Shared cap - not provider-specific, since it's about not hammering the
+// shared auto_responder_mailboxes seedlist pool rather than either
+// provider's own API limits. How many recipients a run sends to is no longer
+// a fixed cap: it's the mailbox's template share of its daily number, see
+// dailyQuota.js.
 const SEND_CONCURRENCY = parseInt(process.env.SES_SEND_CONCURRENCY || '5');
-const CAMPAIGN_MAX_RECIPIENTS = parseInt(process.env.SES_CAMPAIGN_MAX_RECIPIENTS || '100');
 
 // auto_responder_mailboxes is Google-infrastructure-only (imap_host/smtp_host
 // default to imap.gmail.com/smtp.gmail.com) - the only real split within it
@@ -198,7 +199,6 @@ module.exports = {
   createConcurrencyLimiter,
   createRateLimiter,
   SEND_CONCURRENCY,
-  CAMPAIGN_MAX_RECIPIENTS,
   resolveProviderFilter,
   fetchActiveMailboxEmails
 };

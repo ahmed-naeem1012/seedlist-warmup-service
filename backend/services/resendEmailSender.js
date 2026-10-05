@@ -17,7 +17,6 @@ const {
   createConcurrencyLimiter,
   createRateLimiter,
   SEND_CONCURRENCY,
-  CAMPAIGN_MAX_RECIPIENTS,
   resolveProviderFilter,
   fetchActiveMailboxEmails
 } = require('./campaignSendShared');
@@ -70,10 +69,10 @@ const prepareResendCampaign = async ({ orgId, fromEmail, templateId, templateDat
 // Runs the actual send prepared above. Mirrors executeSesSend's shape and
 // bookkeeping exactly, swapping the AWS SDK call for a Resend API call -
 // callers (campaignRunner.js) treat the two interchangeably.
-const executeResendSend = async ({ orgId, fromEmail, subject, html, text, onRecipientsResolved, providerFilter }) => {
+const executeResendSend = async ({ orgId, fromEmail, subject, html, text, onRecipientsResolved, providerFilter, recipientLimit, selectedProviders, providerDistribution }) => {
   const startTime = Date.now();
 
-  const to = await fetchActiveMailboxEmails(providerFilter, CAMPAIGN_MAX_RECIPIENTS, { selectedProviders, providerDistribution });
+  const to = await fetchActiveMailboxEmails(providerFilter, recipientLimit, { selectedProviders, providerDistribution });
   if (onRecipientsResolved) await onRecipientsResolved(to.length);
 
   let sent = 0;
