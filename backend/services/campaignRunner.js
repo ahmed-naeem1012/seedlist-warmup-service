@@ -30,8 +30,10 @@
 // gets SES-verified later automatically switches over with no manual
 // action - see migrations/010_ses_campaigns_send_provider_custom_dns.sql.
 //
-// Unrelated to speed_mode_index (008_ses_campaigns_speed_mode.sql), which
-// only affects cronJobs.js's resend cadence, never touched here.
+// How many recipients a run sends to comes from dailyQuota.js: the sender
+// mailbox's template share of its daily number, divided between its
+// templates. ses_campaigns.speed_mode_index (008_ses_campaigns_speed_mode.sql)
+// is no longer read - the organization's saved speed sets that number.
 
 const supabase = require('./supabaseClient');
 const { prepareSesCampaign, executeSesSend } = require('./sesEmailSender');
@@ -39,6 +41,7 @@ const { prepareResendCampaign, executeResendSend } = require('./resendEmailSende
 const { preparePlatformSesCampaign, executePlatformSesSend } = require('./platformSesEmailSender');
 const { prepareSmtpCampaign, executeSmtpSend } = require('./smtpEmailSender');
 const { prepareOauthCampaign, executeOauthSend } = require('./oauthEmailSender');
+const { getTemplateRecipientLimit } = require('./dailyQuota');
 
 const VALID_POOLS = ['ses', 'custom_dns', 'smtp', 'oauth'];
 
@@ -106,8 +109,7 @@ const executeCampaignSend = ({ transport, ...args }) => {
 // Runs one send for an existing ses_campaigns definition row — the first
 // send (called synchronously-in-background by the API route right after the
 // definition row is inserted) and every recurring resend (called by the
-// cron job in cronJobs.js, at whatever cadence its speed_mode_index sets)
-// both go through this one path. Never inserts into ses_campaigns itself —
+// cron job in cronJobs.js, once per UTC day) both go through this one path. Never inserts into ses_campaigns itself —
 // campaignRow.id must already exist — it only logs the run to
 // ses_campaign_sends and updates both rows' status on completion.
 const runCampaignSend = async (campaignRow) => {
@@ -136,6 +138,25 @@ const runCampaignSend = async (campaignRow) => {
     const prepared = await prepareCampaign({ provider: pool, orgId, fromEmail, templateId, templateData, subject, html, text, providerDistribution, selectedProviders });
     const { transport } = prepared;
 
+    const recipientLimit = await getTemplateRecipientLimit(campaignRow);
+    if (recipientLimit <= 0) {
+      // Nothing left of this mailbox's template share today - not a failure.
+      const result = { sent: 0, failed: 0, total: 0, errors: [], duration: 0 };
+      await supabase
+        .from('ses_campaigns')
+        .update({
+          status: 'completed',
+          sent: result.sent,
+          failed: result.failed,
+          total: result.total,
+          duration: result.duration,
+          error: null,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', campaignId);
+      return result;
+    }
+
     const { data, error: insertError } = await supabase
       .from('ses_campaign_sends')
       .insert({
@@ -161,6 +182,9 @@ const runCampaignSend = async (campaignRow) => {
     const result = await executeCampaignSend({
       transport,
       ...prepared,
+      recipientLimit,
+      selectedProviders,
+      providerDistribution,
       onRecipientsResolved: (total) =>
         supabase.from('ses_campaigns').update({ total }).eq('id', campaignId),
     });

@@ -3,6 +3,7 @@ const rollbar = require('../middlewares/trackers/rollbar');
 
 const supabase = require('./supabaseClient');
 const { runCampaignSend } = require('./campaignRunner');
+const { startOfUtcDay } = require('./dailyQuota');
 
 const { engageTestBrevo } = require('../scripts/seedlist engagments/test engagments/engage-test-brevo');
 const { engageSeedlistBrevo } = require('../scripts/seedlist engagments/seedlist engagments/engage-seedlist-brevo');
@@ -96,49 +97,33 @@ registerWarmerJob({ label: 'Drip Seedlist', schedule: '*/1 * * * *', envFlag: 'D
 registerWarmerJob({ label: 'SES Test', schedule: '*/1 * * * *', envFlag: 'SES_TEST_WARMER', run: engageTestSes });
 registerWarmerJob({ label: 'SES Seedlist', schedule: '*/1 * * * *', envFlag: 'SES_SEEDLIST_WARMER', run: engageSeedlistSes });
 
-const BASE_CAMPAIGN_RESEND_INTERVAL_MS = 24 * 60 * 60 * 1000;
-
-// 0=slow, 1=medium, 2=fast, 3=ultra — same multiplier scale as
-// WarmupScheduler.js's calculateDelayMinutes() (inboxifi-backend-), applied
-// here to the campaign resend interval instead of a per-recipient send
-// delay, since a single SES campaign run always blasts its whole active
-// pool at once rather than pacing individual sends. Extended with an
-// explicit "ultra" entry that scheduler's own array leaves undefined.
-const SPEED_INTERVAL_MULTIPLIERS = [1.5, 1.0, 0.6, 0.4]; // slow, medium, fast, ultra
-
-function resendIntervalMsFor(campaign) {
-  const multiplier = SPEED_INTERVAL_MULTIPLIERS[campaign.speed_mode_index] ?? 1.0;
-  return BASE_CAMPAIGN_RESEND_INTERVAL_MS * multiplier;
+// Stable hour-of-day (UTC) per campaign, so the day's runs are spread
+// across the day instead of every campaign firing in the first tick after
+// midnight.
+function slotHourFor(campaign) {
+  return parseInt(String(campaign.id).replace(/-/g, '').slice(0, 8), 16) % 24;
 }
 
-// Every active ses_campaigns row recurs forever, at a cadence set by its own
-// speed_mode_index, until paused (is_active = false) — there's no
-// per-campaign opt-in. Polls hourly rather than firing once at a fixed
-// daily time so a missed tick or a process restart doesn't push a
-// campaign's resend by a full cycle; the last_run_at age check against each
-// row's own interval is what actually enforces the cadence.
+// Every active ses_campaigns row recurs forever, once per UTC day, until
+// paused (is_active = false) - there's no per-campaign opt-in. Each run
+// sends the sender mailbox's template share of its daily number (see
+// dailyQuota.js); speed_mode_index no longer changes how often a campaign
+// runs. Polls hourly rather than firing once at a fixed daily time so a
+// missed tick or a process restart only delays a campaign to the next tick
+// of the same day, not by a full cycle.
 async function resendDueSesCampaigns() {
-  // Postgres can't express "cutoff varies per row's own speed_mode_index"
-  // in one .or() filter, so this pulls every candidate using the widest
-  // (slowest) possible interval, then narrows to the exact per-row due set
-  // in JS below.
-  const widestIntervalMs = BASE_CAMPAIGN_RESEND_INTERVAL_MS * Math.max(...SPEED_INTERVAL_MULTIPLIERS);
-  const widestCutoff = new Date(Date.now() - widestIntervalMs).toISOString();
-
   const { data: candidates, error } = await supabase
     .from('ses_campaigns')
     .select('*')
     .eq('is_active', true)
     .neq('status', 'sending')
-    .or(`last_run_at.is.null,last_run_at.lte.${widestCutoff}`);
+    .or(`last_run_at.is.null,last_run_at.lt.${startOfUtcDay().toISOString()}`);
 
   if (error) throw new Error(`Failed to load due SES campaigns: ${error.message}`);
   if (!candidates || candidates.length === 0) return { checked: 0, started: 0 };
 
-  const now = Date.now();
-  const dueCampaigns = candidates.filter((campaign) =>
-    !campaign.last_run_at || now - new Date(campaign.last_run_at).getTime() >= resendIntervalMsFor(campaign)
-  );
+  const currentHour = new Date().getUTCHours();
+  const dueCampaigns = candidates.filter((campaign) => currentHour >= slotHourFor(campaign));
 
   let started = 0;
 
