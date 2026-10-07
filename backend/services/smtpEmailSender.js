@@ -2,15 +2,22 @@
 // platformSesEmailSender.js. Same prepare*Campaign / execute*Send pair so
 // campaignRunner.js dispatches to it like any other transport.
 //
-// Sender identity: a warmup mailbox connected via app password on the
-// Maxify dashboard - an organization_warmup_emails row with provider
-// 'smtp'. Its SMTP host/port/username and encrypted password were stored
-// there by maxify-proj/backend's saveSmtpCredentialsHandler, and that same
-// backend already sends daily warmup mail through them
-// (services/warmup/SmtpWarmupService.js). This module does the same thing
-// for a template campaign: the template's subject + body, to the same
-// shuffled slice of the auto_responder_mailboxes seedlist the SES and
-// Resend transports use, with the same per-recipient personalization.
+// Sender identity, looked up in this order:
+//   1. a warmup mailbox connected via app password on the Maxify
+//      dashboard - an organization_warmup_emails row with provider 'smtp'.
+//      Its SMTP host/port/username and encrypted password were stored
+//      there by maxify-proj/backend's saveSmtpCredentialsHandler, and that
+//      same backend already sends daily warmup mail through them
+//      (services/warmup/SmtpWarmupService.js).
+//   2. failing that, an SMTP mailbox added through the public warmup API -
+//      an api_warmup_emails row (same encryption, written by the backend's
+//      warmupApiService), sent through with the settings the API warmup
+//      sender itself uses (services/warmup-api/ApiWarmupService.js). It
+//      must have been started (is_active and warmup_status active).
+// This module does the same thing for a template campaign: the template's
+// subject + body, to the same shuffled slice of the auto_responder_mailboxes
+// seedlist the SES and Resend transports use, with the same per-recipient
+// personalization.
 //
 // Pacing is deliberately much gentler than SES/Resend. Those talk to an
 // API built for volume; this is one real mailbox on Gmail/Outlook/cPanel
@@ -35,23 +42,11 @@ const SMTP_SEND_DELAY_MS = parseInt(process.env.SMTP_SEND_DELAY_MS || '4000');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Validates the request and resolves everything the send needs (template,
-// the connected warmup mailbox and its decrypted SMTP credentials) - same
-// synchronous-path contract as prepareSesCampaign: no recipient fetch and
-// no network I/O to the mail server here, so the API route's up-front
-// validation stays fast. Login is verified once at the start of
-// executeSmtpSend instead, so a bad/rotated password fails the run with one
-// clear error rather than N identical per-recipient failures.
-const prepareSmtpCampaign = async ({ orgId, fromEmail, templateId, templateData, subject, html, text, providerDistribution, selectedProviders } = {}) => {
-  if (!orgId) throw new Error('orgId is required.');
-  if (!fromEmail) throw new Error('fromEmail is required.');
-  if (!templateId && !subject) throw new Error('subject is required when not using templateId.');
-  if (!templateId && !html && !text) throw new Error('At least one of templateId, html or text is required.');
+const isMissingTable = (error) => error && (error.code === '42P01' || error.code === 'PGRST205');
 
-  const loaded = await loadTemplateIfNeeded({ orgId, templateId, templateData, subject, html });
-  subject = loaded.subject;
-  html = loaded.html;
-
+// 1. A dashboard mailbox connected via app password. Returns null when the
+// org has none for this address, so the API mailbox lookup can run.
+const loadDashboardSmtpSender = async (orgId, fromEmail) => {
   const { data: mailbox, error: mailboxError } = await supabase
     .from('organization_warmup_emails')
     .select('id, email, name, provider, connection_status, is_active, smtp_host, smtp_port, smtp_username, smtp_password, smtp_secure')
@@ -61,7 +56,8 @@ const prepareSmtpCampaign = async ({ orgId, fromEmail, templateId, templateData,
     .maybeSingle();
 
   if (mailboxError) throw new Error(`Failed to look up SMTP mailbox: ${mailboxError.message}`);
-  if (!mailbox) throw new Error(`No app-password (SMTP) mailbox found for org ${orgId} / ${fromEmail}.`);
+  if (!mailbox) return null;
+
   if (mailbox.connection_status !== 'connected') {
     throw new Error(`${fromEmail} is not connected (status: ${mailbox.connection_status}). Reconnect it on the dashboard first.`);
   }
@@ -79,27 +75,109 @@ const prepareSmtpCampaign = async ({ orgId, fromEmail, templateId, templateData,
 
   // Same transporter shape as maxify-proj/backend's SmtpWarmupService.js,
   // which is known to work against these exact rows.
-  const smtpConfig = {
-    host: mailbox.smtp_host,
-    port: mailbox.smtp_port,
-    secure: mailbox.smtp_secure || mailbox.smtp_port === 465,
-    auth: {
-      user: mailbox.smtp_username || mailbox.email,
-      pass: smtpPassword
-    },
-    tls: { rejectUnauthorized: false }
+  return {
+    email: mailbox.email,
+    name: mailbox.name,
+    smtpConfig: {
+      host: mailbox.smtp_host,
+      port: mailbox.smtp_port,
+      secure: mailbox.smtp_secure || mailbox.smtp_port === 465,
+      auth: {
+        user: mailbox.smtp_username || mailbox.email,
+        pass: smtpPassword
+      },
+      tls: { rejectUnauthorized: false }
+    }
   };
+};
+
+// 2. An SMTP mailbox added through the public warmup API. Only one that has
+// been started can send: a pending, paused or failed one is refused with
+// the reason.
+const loadApiSmtpSender = async (orgId, fromEmail) => {
+  const { data: mailbox, error } = await supabase
+    .from('api_warmup_emails')
+    .select('id, email, from_name, provider, is_active, warmup_status, smtp_host, smtp_port, smtp_username, smtp_password_encrypted, smtp_use_tls')
+    .eq('organization_id', orgId)
+    .ilike('email', fromEmail)
+    .maybeSingle();
+
+  if (error) {
+    // Anywhere the API warmup tables do not exist there are no API mailboxes.
+    if (isMissingTable(error)) return null;
+    throw new Error(`Failed to look up API mailbox: ${error.message}`);
+  }
+  if (!mailbox) return null;
+
+  if (mailbox.provider && mailbox.provider !== 'smtp') {
+    throw new Error(`${fromEmail} is a ${mailbox.provider} sign-in API mailbox. Only SMTP API mailboxes can send campaigns.`);
+  }
+  if (!mailbox.is_active || !['active', 'completed'].includes(mailbox.warmup_status)) {
+    throw new Error(`${fromEmail} is an API mailbox that is not started (status: ${mailbox.warmup_status}). Start its warmup first.`);
+  }
+  if (!mailbox.smtp_host || !mailbox.smtp_port || !mailbox.smtp_password_encrypted) {
+    throw new Error(`${fromEmail} has no SMTP credentials stored.`);
+  }
+
+  let smtpPassword;
+  try {
+    smtpPassword = decryptWarmupCredential(mailbox.smtp_password_encrypted);
+  } catch (err) {
+    throw new Error(`Could not decrypt the stored SMTP password for ${fromEmail}: ${err.message}`);
+  }
+
+  // The same settings maxify-proj/backend's ApiWarmupService.js sends with.
+  return {
+    email: mailbox.email,
+    name: mailbox.from_name,
+    smtpConfig: {
+      host: mailbox.smtp_host,
+      port: mailbox.smtp_port,
+      secure: mailbox.smtp_port === 465,
+      auth: {
+        user: mailbox.smtp_username || mailbox.email,
+        pass: smtpPassword
+      },
+      tls: { rejectUnauthorized: mailbox.smtp_use_tls !== false }
+    }
+  };
+};
+
+const loadSmtpSender = async (orgId, fromEmail) => {
+  const sender = (await loadDashboardSmtpSender(orgId, fromEmail)) || (await loadApiSmtpSender(orgId, fromEmail));
+  if (!sender) throw new Error(`No app-password (SMTP) or API mailbox found for org ${orgId} / ${fromEmail}.`);
+  return sender;
+};
+
+// Validates the request and resolves everything the send needs (template,
+// the connected warmup mailbox and its decrypted SMTP credentials) - same
+// synchronous-path contract as prepareSesCampaign: no recipient fetch and
+// no network I/O to the mail server here, so the API route's up-front
+// validation stays fast. Login is verified once at the start of
+// executeSmtpSend instead, so a bad/rotated password fails the run with one
+// clear error rather than N identical per-recipient failures.
+const prepareSmtpCampaign = async ({ orgId, fromEmail, templateId, templateData, subject, html, text, providerDistribution, selectedProviders } = {}) => {
+  if (!orgId) throw new Error('orgId is required.');
+  if (!fromEmail) throw new Error('fromEmail is required.');
+  if (!templateId && !subject) throw new Error('subject is required when not using templateId.');
+  if (!templateId && !html && !text) throw new Error('At least one of templateId, html or text is required.');
+
+  const loaded = await loadTemplateIfNeeded({ orgId, templateId, templateData, subject, html });
+  subject = loaded.subject;
+  html = loaded.html;
+
+  const sender = await loadSmtpSender(orgId, fromEmail);
 
   const providerFilter = resolveProviderFilter(selectedProviders, providerDistribution);
 
   return {
     orgId,
-    fromEmail: mailbox.email,
-    fromName: mailbox.name || null,
+    fromEmail: sender.email,
+    fromName: sender.name || null,
     subject,
     html,
     text,
-    smtpConfig,
+    smtpConfig: sender.smtpConfig,
     providerFilter
   };
 };
