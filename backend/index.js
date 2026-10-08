@@ -163,6 +163,7 @@ const server = http.createServer(async (req, res) => {
             aws_access_key_id_enc: encrypt(awsAccessKeyId),
             aws_secret_access_key_enc: encrypt(awsSecretAccessKey),
             is_active: true,
+            last_error: null, // a reconnect clears any earlier error (e.g. a billing disconnect)
           },
           { onConflict: "org_id,from_email" },
         )
@@ -242,6 +243,7 @@ const server = http.createServer(async (req, res) => {
         aws_access_key_id_enc: encrypt(awsAccessKeyId),
         aws_secret_access_key_enc: encrypt(awsSecretAccessKey),
         is_active: true,
+        last_error: null, // a reconnect clears any earlier error (e.g. a billing disconnect)
       }));
 
       const { data, error } = await supabase
@@ -612,6 +614,7 @@ const server = http.createServer(async (req, res) => {
               platformCredentials.secretAccessKey,
             ),
             is_active: true,
+            last_error: null, // a reconnect clears any earlier error (e.g. a billing disconnect)
           },
           { onConflict: "org_id,from_email" },
         )
