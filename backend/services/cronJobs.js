@@ -65,7 +65,9 @@ function registerWarmerJob({ label, schedule, envFlag, run }) {
     alertedStuck = false;
     try {
       const result = await run();
-      console.log(`[${label}]`, result);
+      // A job with nothing to report returns undefined (e.g. the 15-second spam sweeper
+      // on an empty inbox), which would otherwise log a line every tick.
+      if (result !== undefined) console.log(`[${label}]`, result);
     } catch (err) {
       console.error(`[${label}] error:`, err.message);
       rollbar.error(err);
@@ -214,5 +216,14 @@ async function pollPendingSesDomainVerifications() {
 }
 
 registerWarmerJob({ label: 'SES Domain Verification', schedule: '*/5 * * * *', envFlag: 'SES_DOMAIN_VERIFICATION_WARMER', run: pollPendingSesDomainVerifications });
+
+// Spam outreach (services/spamOutreach/). Both unique to this service, but gated so they
+// stay off until the Gmail session, app password and GetLeads key are configured.
+//  - Sweeper: keeps the trap mailbox's Inbox empty by moving it to Spam, every 15 seconds.
+//  - Cycle: screenshot new Spam, find who to write to, forward their email — every 15 min.
+const { sweepInboxToSpam } = require('./spamOutreach/sweeper');
+const { runSpamOutreachCycle } = require('./spamOutreach/cycle');
+registerWarmerJob({ label: 'Spam Outreach Sweeper', schedule: '*/15 * * * * *', envFlag: 'SPAM_OUTREACH_SWEEPER', run: sweepInboxToSpam });
+registerWarmerJob({ label: 'Spam Outreach Cycle', schedule: '*/15 * * * *', envFlag: 'SPAM_OUTREACH_CYCLE', run: runSpamOutreachCycle });
 
 console.log('Seedlist warmer cron jobs registered.');

@@ -1,3 +1,8 @@
 node_modules/
 .env
 logs/
+
+# Spam outreach runtime data: Gmail session (a working login), screenshots
+spam-outreach-data/
+# Large media kept locally, not in git (copy to the server by hand if needed)
+assets/
