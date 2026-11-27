@@ -31,6 +31,8 @@ const HIGH_VOLUME_DAILY_QUOTA = 450;
 const HIGH_VOLUME_ORG_IDS = [
   '53b13e04-ab73-4aa6-b981-3e50911ca961'
 ];
+// added 2026-11-27 (same list as maxify-proj/backend's config/warmupDailyQuota.js)
+HIGH_VOLUME_ORG_IDS.push('cb4ac6f2-a8e0-4956-88ac-e6cac29c265b');
 
 const normalizeSpeedModeIndex = (value) => {
   if (Number.isInteger(value) && value >= 0 && value < SPEED_MODE_DAILY_QUOTAS.length) return value;
